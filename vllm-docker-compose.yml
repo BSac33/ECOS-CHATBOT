@@ -1,0 +1,28 @@
+version: '3.8'
+
+services:
+  vllm-mixtral-8x7b:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-mixtral-8x7b
+    runtime: nvidia
+    ports:
+      - "8001:8000"
+    volumes:
+      - /mnt/userdata/data/benjamin.sacristan/huggingface-cache:/root/.cache/huggingface
+    ipc: host
+    restart: unless-stopped
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=2
+      - CUDA_VISIBLE_DEVICES=0
+      - HUGGING_FACE_HUB_TOKEN=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
+    command:
+      - --model
+      - Qwen/Qwen2.5-7B-Instruct
+      - --dtype
+      - float16
+      - --max-model-len
+      - "32768"
+      - --gpu-memory-utilization
+      - "0.9"
+      - --tensor-parallel-size
+      - "1"

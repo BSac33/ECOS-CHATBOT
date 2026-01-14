@@ -1,0 +1,55 @@
+services:
+  migrate:
+    build: ./app
+    working_dir: /app
+    env_file: fastapi.env
+    depends_on:
+      - database
+    command: alembic upgrade head
+    volumes:
+      - ./app:/app
+    networks: 
+      - ecos_network
+
+  fastapi: 
+    container_name: fastapi
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    working_dir: /app
+    env_file: "fastapi.env"
+    volumes: 
+      - ./app:/app
+    ports:
+      - "8000:8000"
+    depends_on:
+      database :
+        condition: service_healthy
+    networks:
+      - ecos_network
+  
+  database:
+    image: postgres
+    container_name: ecos_db
+    restart: unless-stopped
+    shm_size: 128mb
+    env_file: "postgres.env"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql
+    ports:
+      - "5432:5432"
+    networks:
+      - ecos_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  postgres_data:
+
+networks:
+  ecos_network:
+    driver: bridge
+      
