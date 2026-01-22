@@ -1,25 +1,25 @@
 services:
   migrate:
-    build: ./app
+    build: ./backend_ecos_chatbot/app
     working_dir: /app
-    env_file: fastapi.env
+    env_file: ./backend_ecos_chatbot/fastapi.env
     depends_on:
       - database
     command: alembic upgrade head
     volumes:
-      - ./app:/app
+      - ./backend_ecos_chatbot/app:/app
     networks: 
       - ecos_network
 
   fastapi: 
     container_name: fastapi
     build:
-      context: ./app
+      context: ./backend_ecos_chatbot/app
       dockerfile: Dockerfile
     working_dir: /app
-    env_file: "fastapi.env"
+    env_file: "./backend_ecos_chatbot/fastapi.env"
     volumes: 
-      - ./app:/app
+      - ./backend_ecos_chatbot/app:/app
     ports:
       - "8000:8000"
     depends_on:
@@ -27,15 +27,31 @@ services:
         condition: service_healthy
     networks:
       - ecos_network
+
+  frontend:
+    container_name: frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    working_dir: /app
+    ports:
+      - "5173:5173"
+    depends_on:
+      - fastapi
+    networks:
+      - ecos_network
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
   
   database:
     image: postgres
     container_name: ecos_db
     restart: unless-stopped
     shm_size: 128mb
-    env_file: "postgres.env"
+    env_file: "./backend_ecos_chatbot/postgres.env"
     volumes:
-      - ./data/postgres:/var/lib/postgresql
+      - ./backend_ecos_chatbot/data/postgres:/var/lib/postgresql
     ports:
       - "5432:5432"
     networks:
@@ -52,4 +68,3 @@ volumes:
 networks:
   ecos_network:
     driver: bridge
-      

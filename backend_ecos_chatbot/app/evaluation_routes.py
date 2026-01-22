@@ -5,6 +5,7 @@ L'évaluateur ne parle JAMAIS avec l'étudiant pendant l'examen.
 L'évaluation se fait après la fin de la station en analysant le transcript complet.
 """
 
+from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from uuid import UUID
@@ -18,16 +19,15 @@ from models import (
     StationType
 )
 from ai_chat_utils import evaluate_attempt_with_llm
+from auth import check_authorization
+from models import UserRole, User
+
 
 router = APIRouter()
 
-def get_current_user_id() -> int:
-    """TODO: remplacer par vraie auth"""
-    return 45
-
 
 @router.post("/attempts/{attempt_id}/evaluate", response_model=EvaluationOut)
-def evaluate_attempt(attempt_id: UUID, session: Session = Depends(get_session)):
+def evaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_session)], user: Annotated[User, Depends(check_authorization(UserRole.student))]):
     """
     Évalue une tentative ECOS en analysant le transcript complet.
     
@@ -46,7 +46,8 @@ def evaluate_attempt(attempt_id: UUID, session: Session = Depends(get_session)):
         - La justification avec citations du transcript
         - Le score total et le feedback général
     """
-    user_id = get_current_user_id()
+    
+    user_id = user.id
     
     # Vérifier que la tentative existe et appartient à l'utilisateur
     attempt = session.get(Attempts, attempt_id)
@@ -147,12 +148,12 @@ Contexte du scénario:
 
 
 @router.get("/attempts/{attempt_id}/transcript")
-def get_transcript(attempt_id: UUID, session: Session = Depends(get_session)):
+def get_transcript(attempt_id: UUID, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
     """
     Récupère le transcript complet d'une tentative.
     Utile pour visualiser ce qui sera évalué.
     """
-    user_id = get_current_user_id()
+    user_id = user.id
     
     attempt = session.get(Attempts, attempt_id)
     if not attempt or attempt.user_id != user_id:

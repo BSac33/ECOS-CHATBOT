@@ -11,6 +11,7 @@ import time
 import json
 
 from openai import OpenAI
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -27,6 +28,35 @@ MAX_RETRIES = 3
 INITIAL_RETRY_DELAY = 1
 MAX_RETRY_DELAY = 10
 
+
+# ==================== MODÈLES PYDANTIC POUR STRUCTURED OUTPUT ====================
+
+class EvaluationItem(BaseModel):
+    """Item individuel de la grille d'évaluation"""
+    item_id: str = Field(description="ID unique de l'item dans la grille")
+    edn_code: Optional[str] = Field(None, description="Code EDN associé")
+    criterion: str = Field(description="Critère évalué")
+    points_awarded: int = Field(ge=0, description="Points attribués (0 ou points_possible)")
+    points_possible: int = Field(ge=0, description="Points maximum pour cet item")
+    is_validated: bool = Field(description="Item validé ou non")
+    justification: str = Field(description="Justification avec citations exactes si validé")
+
+
+class EvaluationResult(BaseModel):
+    """Résultat complet de l'évaluation"""
+    items: List[EvaluationItem] = Field(description="Liste de tous les items évalués")
+    total_score: int = Field(ge=0, description="Score total obtenu")
+    total_possible: int = Field(ge=0, description="Score maximum possible")
+    percentage: float = Field(ge=0, le=100, description="Pourcentage de réussite")
+    general_feedback: str = Field(description="Feedback général sur la performance")
+
+
+class EvaluationOutput(BaseModel):
+    """Structure de sortie complète pour l'évaluation"""
+    evaluation: EvaluationResult
+
+
+# ==================== FONCTIONS ====================
 
 def build_patient_system_instruction(patient_prompt: str) -> str:
     return f"""Tu incarnes le patient décrit dans le contexte ci-dessous, dans le cadre d'une simulation clinique pour un étudiant en médecine.
@@ -207,6 +237,7 @@ def evaluate_attempt_with_vllm(
 ) -> dict:
     """
     Évalue une tentative via vLLM en analysant le transcript.
+    Utilise la structured output avec Pydantic pour garantir le format JSON.
     """
     
     if base_url is None:
@@ -222,62 +253,41 @@ def evaluate_attempt_with_vllm(
     grid_json = json.dumps(evaluation_grid, ensure_ascii=False, indent=2)
     
     system_instruction = f"""Tu es un évaluateur d'ECOS (Examen Clinique Objectif Structuré).
-    Tu analyses la performance de l'étudiant et remplis la grille d'évaluation de manière OBJECTIVE.
+Tu analyses la performance de l'étudiant et remplis la grille d'évaluation de manière OBJECTIVE.
 
-    [CONTEXTE DU CAS]
-    {case_context}
+[CONTEXTE DU CAS]
+{case_context}
 
-    [GRILLE D'ÉVALUATION]
-    {grid_json}
+[GRILLE D'ÉVALUATION]
+{grid_json}
 
-    FORMAT DE SORTIE (OBLIGATOIRE):
-    Tu retournes UNIQUEMENT un JSON valide (sans ```), au format:
-    {{
-    "evaluation": {{
-        "items": [
-        {{
-            "item_id": "...",
-            "edn_code": "...",
-            "criterion": "...",
-            "points_awarded": 0,
-            "points_possible": 1,
-            "is_validated": false,
-            "justification": "..."
-        }}
-        ],
-        "total_score": 0,
-        "total_possible": 0,
-        "percentage": 0.0,
-        "general_feedback": "..."
-    }}
-    }}
+RÈGLES CRITIQUES (ANTI-HALLUCINATION):
+- Tu dois te baser UNIQUEMENT sur le transcript fourni.
+- Tu n'attribues des points (points_awarded > 0) QUE si tu fournis au moins UNE citation EXACTE du transcript (copier-coller mot pour mot, entre guillemets).
+- Si tu ne peux pas citer exactement, alors points_awarded=0 et is_validated=false.
+- N'invente jamais de citations.
 
-    RÈGLES CRITIQUES (ANTI-HALLUCINATION):
-    - Tu dois te baser UNIQUEMENT sur le transcript fourni.
-    - Tu n'attribues des points (points_awarded > 0) QUE si tu fournis au moins UNE citation EXACTE du transcript (copier-coller mot pour mot, entre guillemets).
-    - Si tu ne peux pas citer exactement, alors points_awarded=0 et is_validated=false.
-    - N'invente jamais de citations.
+COUVERTURE OBLIGATOIRE:
+- Tu dois produire exactement un item de sortie pour CHAQUE item de la grille.
+- Ne fusionne pas les items. Ne supprime pas d'items.
+- Conserve item_id, edn_code, criterion et points_possible exactement comme dans la grille.
 
-    COUVERTURE OBLIGATOIRE:
-    - Tu dois produire exactement un item de sortie pour CHAQUE item de la grille.
-    - Ne fusionne pas les items. Ne supprime pas d'items.
-    - Conserve item_id, edn_code, criterion et points_possible exactement comme dans la grille.
+SCORING:
+- points_awarded est 0 ou points_possible (pas de demi-points), sauf si la grille indique explicitement qu'un item accepte des points partiels.
+- Si un item est composite (ex: "Traitements et allergies"), il n'est validé QUE si tous les éléments sont présents explicitement dans le transcript.
 
-    SCORING:
-    - points_awarded est 0 ou points_possible (pas de demi-points), sauf si la grille indique explicitement qu'un item accepte des points partiels.
-    - Si un item est composite (ex: "Traitements et allergies"), il n'est validé QUE si tous les éléments sont présents explicitement dans le transcript.
+STYLE DES JUSTIFICATIONS:
+- Si validé: commence par la/les citation(s) exacte(s) entre guillemets, puis une explication courte.
+- Si non validé: explique brièvement ce qui manque, sans inventer.
 
-    STYLE DES JUSTIFICATIONS:
-    - Si validé: commence par la/les citation(s) exacte(s) entre guillemets, puis une explication courte.
-    - Si non validé: explique brièvement ce qui manque, sans inventer.
-
-    IMPORTANT (clinique réaliste):
-    - Ne pénalise pas l'absence d'annonce de structure.
-    - Pour la mise en confiance, compte toute empathie verbalisée explicite.
-    """
+IMPORTANT (clinique réaliste):
+- Ne pénalise pas l'absence d'annonce de structure.
+- Pour la mise en confiance, compte toute empathie verbalisée explicite.
+"""
     
-    logger.info(f"📤 Envoi évaluation à vLLM (modèle: {model})")
+    logger.info(f"📤 Envoi évaluation à vLLM avec structured output (modèle: {model})")
     logger.info(f"📝 Transcript: {len(transcript)} caractères")
+    logger.info(f"🔧 Utilisation du schéma Pydantic: EvaluationOutput")
     
     messages = [
         {"role": "system", "content": system_instruction},
@@ -286,11 +296,21 @@ def evaluate_attempt_with_vllm(
     
     for attempt in range(MAX_RETRIES):
         try:
+            # Utiliser l'API OpenAI avec response_format pour structured output
+            # Compatible avec vLLM si configuré avec --enable-auto-tool-choice
             response = client.chat.completions.create(
                 model=model,
                 messages=messages,
                 temperature=0.2,
                 max_tokens=4096,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "evaluation_output",
+                        "schema": EvaluationOutput.model_json_schema(),
+                        "strict": True
+                    }
+                }
             )
             
             if not response.choices:
@@ -304,37 +324,46 @@ def evaluate_attempt_with_vllm(
                 raise ValueError("Contenu vide retourné par vLLM")
             
             result_text = result_text.strip()
-            logger.info(f"📥 Réponse vLLM ({len(result_text)} caractères)")
+            logger.info(f"📥 Réponse vLLM structurée ({len(result_text)} caractères)")
             
-            # Nettoyer le JSON si entouré de markdown
-            if result_text.startswith("```json"):
-                result_text = result_text[7:]
-            if result_text.startswith("```"):
-                result_text = result_text[3:]
-            if result_text.endswith("```"):
-                result_text = result_text[:-3]
-            result_text = result_text.strip()
-            
-            # Nettoyer les échappements invalides
-            
-            import re
-            
-            # Remplacer les séquences d'échappement invalides par des versions correctes
-            
-            result_text = re.sub(r'\\([^"\\/bfnrtu])', r'\\\\\1', result_text)
-            
+            # Parser et valider avec Pydantic
             try:
-                return json.loads(result_text)
-            except json.JSONDecodeError as json_err:
-                logger.error(f"❌ Erreur parsing JSON: {json_err}")
-                logger.error(f"❌ Réponse: {result_text[:500]}...")
-                raise ValueError(f"JSON invalide du LLM: {json_err}")
+                validated_output = EvaluationOutput.model_validate_json(result_text)
+                logger.info(f"✅ Validation Pydantic réussie: {len(validated_output.evaluation.items)} items")
+                
+                # Convertir en dict pour compatibilité avec le reste du code
+                return validated_output.model_dump()
+                
+            except Exception as pydantic_err:
+                logger.error(f"❌ Erreur validation Pydantic: {pydantic_err}")
+                logger.error(f"❌ JSON reçu: {result_text[:500]}...")
+                
+                # Fallback: essayer de parser en JSON brut
+                try:
+                    result_dict = json.loads(result_text)
+                    logger.warning("⚠️ Validation Pydantic échouée, mais JSON valide - utilisation du résultat")
+                    return result_dict
+                except json.JSONDecodeError as json_err:
+                    logger.error(f"❌ Erreur parsing JSON: {json_err}")
+                    raise ValueError(f"JSON invalide du LLM: {json_err}")
                 
         except Exception as e:
             if attempt < MAX_RETRIES - 1:
                 delay = min(INITIAL_RETRY_DELAY * (2 ** attempt), MAX_RETRY_DELAY)
                 logger.warning(f"Erreur évaluation vLLM (tentative {attempt + 1}/{MAX_RETRIES}): {e}")
+                logger.info(f"🔄 Nouvelle tentative dans {delay}s...")
                 time.sleep(delay)
             else:
                 logger.error(f"❌ Échec évaluation après {MAX_RETRIES} tentatives")
-                raise
+                
+                # En dernier recours, retourner une structure vide valide
+                logger.warning("⚠️ Retour d'une structure d'évaluation vide par défaut")
+                return {
+                    "evaluation": {
+                        "items": [],
+                        "total_score": 0,
+                        "total_possible": 0,
+                        "percentage": 0.0,
+                        "general_feedback": f"Erreur lors de l'évaluation: {str(e)}"
+                    }
+                }

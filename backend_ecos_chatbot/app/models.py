@@ -25,14 +25,12 @@ class ChatOut(BaseModel):
     patient_reply: str
     attachments: Optional[List[str]] = None  # UUIDs des fichiers attachés
 
-
 class AttachmentUploadOut(BaseModel):
     id: str  # UUID sérialisé
     filename: str
     file_url: str
     kind: str
     size_bytes: int
-
 
 class AttachmentOut(BaseModel):
     id: str  # UUID sérialisé
@@ -44,7 +42,6 @@ class AttachmentOut(BaseModel):
     file_url: str
     uploaded_at: str
 
-
 class EvaluationItemOut(BaseModel):
     """Un item individuel de la grille d'évaluation avec le résultat"""
     item_id: str
@@ -54,7 +51,6 @@ class EvaluationItemOut(BaseModel):
     is_validated: bool
     justification: str
 
-
 class EvaluationResultOut(BaseModel):
     """Résultat complet de l'évaluation d'une tentative"""
     items: List[EvaluationItemOut]
@@ -63,11 +59,17 @@ class EvaluationResultOut(BaseModel):
     percentage: float
     general_feedback: str
 
-
 class EvaluationOut(BaseModel):
     """Enveloppe pour le résultat d'évaluation"""
     evaluation: EvaluationResultOut
-
+    
+class UserOut(BaseModel):
+    id: int
+    username: str
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    is_active: bool
+    role: str
 
 # ============= ADMIN MODELS =============
 
@@ -105,6 +107,18 @@ class ClinicalCaseOut(BaseModel):
     duration_seconds: int
     status: str
     created_by: int
+    has_evaluation_grid: bool
+
+
+class ClinicalCasePublicOut(BaseModel):
+    """Sortie publique d'un cas clinique (sans les instructions sensibles)"""
+    id: int
+    title: str
+    station_type: str
+    duration_seconds: int
+    status: str
+    disciplines: List[str] = []  # Noms des disciplines
+    edn_codes: List[int] = []  # Numéros des items EDN
     has_evaluation_grid: bool
 
 

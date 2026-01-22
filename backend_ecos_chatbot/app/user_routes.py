@@ -4,15 +4,16 @@ Routes pour gérer les données utilisateur et statistiques.
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select, func
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Annotated
 from uuid import UUID
 
 from db import get_session
 from models import (
     User, Attempts, ClinicalCase, Message, EvaluationGrid,
-    StationType, ChatRole
+    StationType, ChatRole, UserOut
 )
 from pydantic import BaseModel
+from auth import check_authorization, get_current_user
 
 
 router = APIRouter()
@@ -47,21 +48,26 @@ class UserAttemptsResponse(BaseModel):
     attempts: List[AttemptSummary]
     stats: UserStats
 
+@router.get("/me", response_model=UserOut)
+async def get_current_user_info(
+    user: Annotated[User, Depends(check_authorization())]
+    
+) -> UserOut:
+    """
+    Récupère les informations de l'utilisateur connecté.
+    """
+    return UserOut.model_validate(user.model_dump())
 
-# Helper pour récupérer l'utilisateur actuel (à remplacer par vraie auth)
-def get_current_user_id() -> int:
-    """TODO: Remplacer par vraie authentification JWT"""
-    return 45
 
-
-@router.get("/users/me/attempts", response_model=UserAttemptsResponse)
+@router.get("/me/attempts", response_model=UserAttemptsResponse)
 def get_user_attempts(
+    user: Annotated[User, Depends(check_authorization())],
+    session: Annotated[Session, Depends(get_session)],
     completed: Optional[bool] = Query(None, description="Filtrer par statut (true=complétées, false=en cours, null=toutes)"),
     case_id: Optional[int] = Query(None, description="Filtrer par cas clinique"),
     station_type: Optional[StationType] = Query(None, description="Filtrer par type de station"),
     limit: int = Query(50, ge=1, le=200, description="Nombre maximum de résultats"),
-    offset: int = Query(0, ge=0, description="Décalage pour pagination"),
-    session: Session = Depends(get_session),
+    offset: int = Query(0, ge=0, description="Décalage pour pagination")
 ):
     """
     Récupère toutes les tentatives d'un utilisateur avec filtres et statistiques.
@@ -71,7 +77,7 @@ def get_user_attempts(
     - Statistiques du dashboard
     - Reprise de tentatives en cours
     """
-    user_id = get_current_user_id()
+    user_id = user.id
     
     # Construire la requête de base
     stmt = (
@@ -169,16 +175,18 @@ def get_user_attempts(
     return UserAttemptsResponse(attempts=attempts_list, stats=stats)
 
 
-@router.get("/users/me/attempts/{attempt_id}", response_model=AttemptSummary)
+@router.get("/me/attempts/{attempt_id}", response_model=AttemptSummary)
 def get_user_attempt_detail(
+    user: Annotated[User, Depends(check_authorization())],
     attempt_id: UUID,
-    session: Session = Depends(get_session),
+    session: Annotated[Session, Depends(get_session)],
+
 ):
     """
     Récupère les détails d'une tentative spécifique.
     Vérifie que l'attempt appartient bien à l'utilisateur.
     """
-    user_id = get_current_user_id()
+    user_id = user.id
     
     stmt = (
         select(
@@ -217,8 +225,9 @@ def get_user_attempt_detail(
     )
 
 
-@router.delete("/users/me/attempts/{attempt_id}")
+@router.delete("/me/attempts/{attempt_id}")
 def delete_user_attempt(
+    user: Annotated[User, Depends(check_authorization())],
     attempt_id: UUID,
     session: Session = Depends(get_session),
 ):
@@ -226,8 +235,8 @@ def delete_user_attempt(
     Supprime une tentative de l'utilisateur.
     Supprime également tous les messages associés (cascade).
     """
-    user_id = get_current_user_id()
-    
+    user_id = user.id
+
     attempt = session.get(Attempts, attempt_id)
     
     if not attempt:
@@ -249,15 +258,16 @@ def delete_user_attempt(
     return {"message": "Attempt deleted successfully", "id": str(attempt_id)}
 
 
-@router.get("/users/me/stats", response_model=UserStats)
+@router.get("/me/stats", response_model=UserStats)
 def get_user_stats(
+    user: Annotated[User, Depends(check_authorization())],
     session: Session = Depends(get_session),
 ):
     """
     Récupère uniquement les statistiques de l'utilisateur.
     Endpoint léger pour dashboard.
     """
-    user_id = get_current_user_id()
+    user_id = user.id
     
     # Statistiques des attempts
     stats_stmt = (

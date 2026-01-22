@@ -4,12 +4,13 @@ from datetime import datetime, timedelta
 from uuid import UUID
 from db import get_session
 import os
-from models import ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, StationType
+from models import ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, StationType, User
 from ai_chat_utils import generate_patient_reply
 from vllm_chat_utils import get_chat_completion_vllm
 from attachment_routes import find_matching_attachments
 import logging 
 import asyncio
+from auth import check_authorization 
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -27,15 +28,9 @@ api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     raise RuntimeError("GEMINI_API_KEY environment variable not set")
 
-# NOTE: remplace ça par ton auth (current_user)
-def get_current_user_id() -> int:
-    return 45
-
 @router.post("/attempts", response_model=AttemptOut)
-def create_attempt(payload: AttemptCreateIn, session: Session = Depends(get_session)):
+async def create_attempt(payload: AttemptCreateIn, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
     logger.info(f"🆕 Création tentative pour le cas ID {payload.case_id}")
-    
-    user_id = get_current_user_id()
 
     case = session.get(ClinicalCase, payload.case_id)
     
@@ -45,7 +40,7 @@ def create_attempt(payload: AttemptCreateIn, session: Session = Depends(get_sess
     logger.info(f"⏱️ Durée du cas: {case.duration_seconds} secondes")
     logger.info(f"case found: {case.title}")
 
-    attempt = Attempts(user_id=user_id, case_id=payload.case_id, created_at=datetime.utcnow(), is_completed=False)
+    attempt = Attempts(user_id=user.id, case_id=payload.case_id, created_at=datetime.utcnow(), is_completed=False)
     
     # Calculer l'heure de fin basée sur la durée du cas
     attempt.expires_at = attempt.created_at + timedelta(seconds=case.duration_seconds)
@@ -72,11 +67,9 @@ def create_attempt(payload: AttemptCreateIn, session: Session = Depends(get_sess
     )
 
 @router.get("/attempts/{attempt_id}/messages")
-def get_messages(attempt_id: UUID, session: Session = Depends(get_session)):
-    user_id = get_current_user_id()
-
+def get_messages(attempt_id: UUID, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
     attempt = session.get(Attempts, attempt_id)
-    if not attempt or attempt.user_id != user_id:
+    if not attempt or attempt.user_id != user.id:
         raise HTTPException(404, "Attempt not found")
 
     stmt = select(Message).where(Message.attempt_id == attempt_id).order_by(Message.created_at)
@@ -89,12 +82,14 @@ def get_messages(attempt_id: UUID, session: Session = Depends(get_session)):
 
 
 @router.get("/attempts/{attempt_id}/time-remaining")
-def get_time_remaining(attempt_id: UUID, session: Session = Depends(get_session)):
+def get_time_remaining(
+    attempt_id: UUID, 
+    session: Session = Depends(get_session),
+    user: User = Depends(check_authorization())
+):
     """Récupère le temps restant pour une tentative"""
-    user_id = get_current_user_id()
-
     attempt = session.get(Attempts, attempt_id)
-    if not attempt or attempt.user_id != user_id:
+    if not attempt or attempt.user_id != user.id:
         raise HTTPException(404, "Attempt not found")
 
     if attempt.is_completed:
@@ -108,7 +103,7 @@ def get_time_remaining(attempt_id: UUID, session: Session = Depends(get_session)
         return {
             "is_expired": False,
             "seconds_remaining": None,
-            "message": "Pas de limite de temps"
+            "message": "Le chronomètre n'a pas encore été démarré"
         }
 
     now = datetime.utcnow()
@@ -128,11 +123,9 @@ def get_time_remaining(attempt_id: UUID, session: Session = Depends(get_session)
 
 
 @router.post("/attempts/{attempt_id}/chat", response_model=ChatOut)
-async def chat(attempt_id: UUID, payload: ChatIn, session: Session = Depends(get_session)):
-    user_id = get_current_user_id()
-
+async def chat(attempt_id: UUID, payload: ChatIn, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
     attempt = session.get(Attempts, attempt_id)
-    if not attempt or attempt.user_id != user_id:
+    if not attempt or attempt.user_id != user.id:
         raise HTTPException(404, "Attempt not found")
     if attempt.is_completed:
         raise HTTPException(400, "Attempt already completed")
@@ -237,11 +230,9 @@ async def chat(attempt_id: UUID, payload: ChatIn, session: Session = Depends(get
     )
 
 @router.post("/attempts/{attempt_id}/finalize")
-def finalize_attempt(attempt_id: UUID, session: Session = Depends(get_session)):
-    user_id = get_current_user_id()
-
+def finalize_attempt(attempt_id: UUID, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
     attempt = session.get(Attempts, attempt_id)
-    if not attempt or attempt.user_id != user_id:
+    if not attempt or attempt.user_id != user.id:
         raise HTTPException(404, "Attempt not found")
 
     attempt.is_completed = True

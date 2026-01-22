@@ -1,32 +1,49 @@
 <script setup lang="ts">
-import { AIClient, type Message } from '@aivue/core';
+import { RouterLink, RouterView } from 'vue-router';
+import { Drawer } from 'primevue';
+import Button from 'primevue/button';
+import { ref } from 'vue';
+import 'primeicons/primeicons.css';
 
-
-const API_KEY = "AIzaSyB8zRvmHI8AuwSm0Ox-jDej7i4xk8KitkU";
-const MODEL = import.meta.env.VITE_GEMINI_MODEL ?? "gemini-2.5-flash";
-
-const aiClient = new AIClient({
-  provider: "gemini",
-  apiKey: "AIzaSyB8zRvmHI8AuwSm0Ox-jDej7i4xk8KitkU"
-});
-
-console.log("Using model:", MODEL);
-console.log("API Key:", API_KEY ? "Provided" : "Not Provided");
-
-const message: Message = {
-  role: 'user',
-  content: 'Hello, can you help me with Vue.js?'
-};
-
-const chat = await aiClient.chat([message]);
-console.log("RAW CHAT:", chat);
-console.log("RAW CHAT JSON:", JSON.stringify(chat, null, 2));
-
+const visible = ref(false);
 </script>
 
 <template>
+  <div class="app-shell">
+    <div class="topbar">
+      <Drawer v-model:visible="visible" header="Menu principal">
+        <p><RouterLink @click="visible = false" to="/">Dashboard</RouterLink></p>
+        <p><RouterLink @click="visible = false" to="/login">Login</RouterLink></p>
+      </Drawer>
+
+      <Button icon="pi pi-arrow-right" @click="visible = true" />
+    </div>
+
+    <div class="main-view">
+      <RouterView />
+    </div>
+  </div>
 </template>
 
-<style scoped>
+<style>
 
+.app-shell {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  min-height: 0; /* important pour le scroll interne */
+}
+
+.topbar {
+  flex: 0 0 auto;
+  padding: 1rem;
+  border-bottom: 1px solid #eee;
+}
+
+.main-view {
+  flex: 1;
+  min-height: 0;  /* 🔥 super important */
+  padding: 4rem;
+  overflow:hidden
+}
 </style>
