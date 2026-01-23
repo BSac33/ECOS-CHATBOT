@@ -108,16 +108,21 @@ async function loadInitialData() {
     try {
         isLoadingData.value = true;
         
-        // Fetch en parallèle : titre du cas + temps restant
-        const [timeResponse, caseResponse] = await Promise.all([
-            fetch(`/chat/attempts/${props.attemptId}/time-remaining`, {
+        // Fetch en parallèle : infos du cas + temps restant
+        const [caseInfoResponse, timeResponse] = await Promise.all([
+            fetch(`/chat/attempts/${props.attemptId}/case-info`, {
                 credentials: 'include'
             }),
-            // Fetch du cas pour récupérer le titre (via les messages ou une route dédiée)
-            fetch(`/chat/attempts/${props.attemptId}/messages`, {
+            fetch(`/chat/attempts/${props.attemptId}/time-remaining`, {
                 credentials: 'include'
             })
         ]);
+
+        // Récupérer le titre du cas
+        if (caseInfoResponse.ok) {
+            const caseInfo = await caseInfoResponse.json();
+            caseTitle.value = caseInfo.title;
+        }
 
         if (!timeResponse.ok) {
             throw new Error('Erreur lors du chargement du timer');
@@ -156,36 +161,12 @@ async function loadInitialData() {
             console.log('ℹ️ Timer pas encore démarré (expires_at manquant)');
         }
 
-        // Extraire le titre du cas depuis le premier message système
-        if (caseResponse.ok) {
-            const messages = await caseResponse.json();
-            const systemMessage = messages.find((m: any) => m.role === 'system');
-            if (systemMessage) {
-                // Le titre est dans les instructions, on prend les 50 premiers caractères
-                caseTitle.value = extractCaseTitle(systemMessage.content);
-            }
-        }
-
     } catch (error) {
         console.error('Erreur lors du chargement des données:', error);
-        caseTitle.value = 'Cas clinique';
+        caseTitle.value = 'Cas clinique'; // Fallback
     } finally {
         isLoadingData.value = false;
     }
-}
-
-/**
- * Extrait un titre court depuis le contenu du message système
- */
-function extractCaseTitle(content: string): string {
-    // Prendre les 60 premiers caractères, couper au dernier espace
-    const maxLength = 60;
-    if (content.length <= maxLength) return content;
-    
-    const truncated = content.substring(0, maxLength);
-    const lastSpace = truncated.lastIndexOf(' ');
-    
-    return lastSpace > 0 ? truncated.substring(0, lastSpace) + '...' : truncated + '...';
 }
 
 /**

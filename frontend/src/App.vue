@@ -54,8 +54,8 @@ const visible = ref(false);
 .main-view {
   flex: 1;
   min-height: 0;  /* 🔥 super important */
-  padding-left: 4rem;
-  padding-right: 4rem;
+  padding-left: 5rem;
+  padding-right: 5rem;
   overflow: hidden;
 }
 </style>

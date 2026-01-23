@@ -75,8 +75,6 @@
             }"/>
       </div>
     </InstructionPopup>
-    <p v-else>No popup found</p>
-
     </div>
     <div id="case-container">
 <Card

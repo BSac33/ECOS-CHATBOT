@@ -120,6 +120,24 @@ def get_messages(attempt_id: UUID, session: Session = Depends(get_session), user
         for m in msgs
     ]
 
+@router.get("/attempts/{attempt_id}/case-info")
+def get_case_info(attempt_id: UUID, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
+    """Récupère les informations du cas clinique associé à un attempt"""
+    attempt = session.get(Attempts, attempt_id)
+    if not attempt or attempt.user_id != user.id:
+        raise HTTPException(404, "Attempt not found")
+    
+    case = session.get(ClinicalCase, attempt.case_id)
+    if not case:
+        raise HTTPException(500, "Case not found")
+    
+    return {
+        "case_id": case.id,
+        "title": case.title,
+        "station_type": case.station_type,
+        "duration_seconds": case.duration_seconds
+    }
+
 
 @router.get("/attempts/{attempt_id}/time-remaining")
 def get_time_remaining(

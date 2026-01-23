@@ -4,7 +4,7 @@ Utilitaires pour interagir avec vLLM via l'API OpenAI-compatible
 """
 from __future__ import annotations
 
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Literal
 import os
 import logging
 import time
@@ -56,6 +56,42 @@ class EvaluationOutput(BaseModel):
     evaluation: EvaluationResult
 
 
+# ==================== MODÈLES PYDANTIC POUR L'ARBITRAGE ====================
+
+class ArbiterExam(BaseModel):
+    requested: bool = Field(description="True si un examen est explicitement demandé")
+    label: Optional[str] = Field(None, description="Nom de l'examen demandé")
+    confidence: Optional[float] = Field(None, ge=0, le=1, description="Confiance sur la détection")
+
+
+class ArbiterSafety(BaseModel):
+    allow_to_transcript: bool = Field(description="Autoriser l'ajout du message au transcript")
+    redact: bool = Field(description="Indique si un masquage est nécessaire")
+    redacted_text: Optional[str] = Field(None, description="Texte masqué si nécessaire")
+
+
+class ArbiterOutput(BaseModel):
+    category: Literal[
+        "CLINICAL_QUESTION",
+        "EXAM_REQUEST",
+        "EMPATHY",
+        "META",
+        "CLOSING",
+        "OFF_TOPIC",
+        "ABUSIVE",
+        "OTHER",
+    ]
+    tone: Literal[
+        "NEUTRAL",
+        "EMPATHETIC",
+        "ANXIOUS",
+        "AGGRESSIVE",
+        "INSULTING",
+    ]
+    exam: ArbiterExam
+    safety: ArbiterSafety
+
+
 # ==================== FONCTIONS ====================
 
 def build_patient_system_instruction(patient_prompt: str) -> str:
@@ -94,6 +130,122 @@ AGRESSION / INSULTES (TRÈS IMPORTANT):
 Contexte patient (à utiliser, sans le réciter):
 {patient_prompt}
 """.strip()
+
+
+def build_arbiter_system_instruction() -> str:
+    return """Tu es un classifieur d'intention pour une simulation d'ECOS.
+Tu reçois un seul message etudiant et tu dois retourner uniquement un JSON conforme au schema fourni.
+Ne donne aucune explication.
+Si le message contient une demande d'examen (ECG, radio, bilan bio...), remplis exam.
+Si le message est insultant/haineux/harcelant, mets category=ABUSIVE, tone=INSULTING, allow_to_transcript=false et fournis une version redacted si nécessaire.
+Si ce n'est pas une question clinique explicite, ne mets pas CLINICAL_QUESTION.""".strip()
+
+
+def build_arbiter_user_prompt(attachment_names: List[str], student_message: str) -> str:
+    attachments_block = "\n".join(f"- {name}" for name in attachment_names) or "- (aucun)"
+    return f"""[ATTACHMENTS]
+{attachments_block}
+
+[MESSAGE_ETUDIANT]
+{student_message}
+""".strip()
+
+
+def classify_student_message_vllm_arbiter(
+    attachment_names: List[str],
+    student_message: str,
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
+) -> dict:
+    """Classifie un message étudiant via le modèle arbitre vLLM (JSON structuré)."""
+    if base_url is None:
+        base_url = os.getenv("VLLM_ARBITER_BASE_URL", "http://10.33.35.222:8002/v1")
+    if model is None:
+        model = os.getenv("VLLM_ARBITER_MODEL", "Qwen/Qwen2.5-3B-Instruct")
+
+    client = OpenAI(
+        base_url=base_url,
+        api_key="dummy-key"
+    )
+
+    system_instruction = build_arbiter_system_instruction()
+    user_prompt = build_arbiter_user_prompt(attachment_names, student_message)
+
+    messages = [
+        {"role": "system", "content": system_instruction},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    logger.info("🧭 Arbitrage message étudiant via vLLM")
+    logger.info(f"📡 Base URL: {base_url}, Modèle: {model}")
+    logger.info(f"📎 Attachments: {len(attachment_names)}")
+
+    for attempt in range(MAX_RETRIES):
+        try:
+            # vLLM utilise outlines pour respecter le JSON schema
+            response = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=512,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "arbiter_output",
+                        "schema": ArbiterOutput.model_json_schema(),
+                        "strict": True
+                    }
+                }
+            )
+
+            if not response.choices:
+                logger.error("❌ Aucun choix dans la réponse vLLM arbitre")
+                raise ValueError("Aucun choix retourné par vLLM arbitre")
+
+            result_text = response.choices[0].message.content
+            if not result_text:
+                logger.error("❌ Contenu vide dans la réponse vLLM arbitre")
+                logger.error(f"❌ Réponse complète: {response}")
+                raise ValueError("Contenu vide retourné par vLLM arbitre")
+
+            result_text = result_text.strip()
+            logger.info(f"📥 Réponse arbitre structurée ({len(result_text)} caractères)")
+
+            try:
+                validated_output = ArbiterOutput.model_validate_json(result_text)
+                return validated_output.model_dump()
+            except Exception as pydantic_err:
+                logger.error(f"❌ Erreur validation Pydantic (arbitre): {pydantic_err}")
+                logger.error(f"❌ JSON reçu: {result_text[:500]}...")
+
+                try:
+                    return json.loads(result_text)
+                except json.JSONDecodeError as json_err:
+                    logger.error(f"❌ Erreur parsing JSON (arbitre): {json_err}")
+                    raise ValueError(f"JSON invalide du LLM arbitre: {json_err}")
+
+        except Exception as e:
+            if attempt < MAX_RETRIES - 1:
+                delay = min(INITIAL_RETRY_DELAY * (2 ** attempt), MAX_RETRY_DELAY)
+                logger.warning(f"Erreur arbitre vLLM (tentative {attempt + 1}/{MAX_RETRIES}): {e}")
+                logger.info(f"🔄 Nouvelle tentative dans {delay}s...")
+                time.sleep(delay)
+            else:
+                logger.error(f"❌ Échec arbitre après {MAX_RETRIES} tentatives")
+                return {
+                    "category": "OTHER",
+                    "tone": "NEUTRAL",
+                    "exam": {
+                        "requested": False,
+                        "label": None,
+                        "confidence": None
+                    },
+                    "safety": {
+                        "allow_to_transcript": True,
+                        "redact": False,
+                        "redacted_text": None
+                    }
+                }
 
 def get_chat_completion_vllm(
     base_url: Optional[str] = None,
