@@ -34,6 +34,17 @@
 
   async function createAttempt(caseId: number) {
     try {
+      // Vérifier d'abord s'il existe un attempt actif
+      const activeAttempt = await apiService.getActiveAttempt(caseId);
+      
+      if (activeAttempt) {
+        console.log('✅ Attempt actif trouvé, redirection...');
+        router.push(`/chat/${activeAttempt.id}`);
+        return;
+      }
+      
+      // Sinon, créer un nouvel attempt
+      console.log('🆕 Création d\'un nouvel attempt...');
       const attempt = await apiService.createAttempt(caseId);
       router.push(`/chat/${attempt.id}`);
 

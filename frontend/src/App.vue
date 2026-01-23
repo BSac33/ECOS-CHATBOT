@@ -10,15 +10,17 @@ const visible = ref(false);
 
 <template>
   <div class="app-shell">
-    <div class="topbar">
+    <!-- Bouton flottant en position fixe à gauche -->
+    <div class="floating-menu-button" :class="{ 'menu-open': visible }">
       <Drawer v-model:visible="visible" header="Menu principal">
         <p><RouterLink @click="visible = false" to="/">Dashboard</RouterLink></p>
         <p><RouterLink @click="visible = false" to="/login">Login</RouterLink></p>
       </Drawer>
 
-      <Button icon="pi pi-arrow-right" @click="visible = true" />
+      <Button icon="pi pi-bars" @click="visible = true" rounded />
     </div>
 
+    <!-- Vue principale sans décalage -->
     <div class="main-view">
       <RouterView />
     </div>
@@ -34,16 +36,26 @@ const visible = ref(false);
   min-height: 0; /* important pour le scroll interne */
 }
 
-.topbar {
-  flex: 0 0 auto;
-  padding: 1rem;
-  border-bottom: 1px solid #eee;
+/* Bouton flottant fixe en haut à gauche */
+.floating-menu-button {
+  position: fixed;
+  top: 1rem;
+  left: 1rem;
+  z-index: 1000; /* Au-dessus du contenu */
+  transition: opacity 0.3s ease;
+}
+
+/* Masquer le bouton quand le menu est ouvert */
+.floating-menu-button.menu-open {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .main-view {
   flex: 1;
   min-height: 0;  /* 🔥 super important */
-  padding: 4rem;
-  overflow:hidden
+  padding-left: 4rem;
+  padding-right: 4rem;
+  overflow: hidden;
 }
 </style>

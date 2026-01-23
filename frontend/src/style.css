@@ -1,6 +1,10 @@
 :root {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
     Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+  
+  /* Force le mode clair par défaut */
+  color: #213547;
+  background-color: #ffffff;
 }
 
 /* reset layout webapp */
@@ -8,11 +12,13 @@ html, body, #app {
   height: 100%;
   width: 100%;
   margin: 0;
+  background-color: #ffffff;
 }
 
 body {
   overflow: hidden;     /* pas de scroll global */
   font-family: inherit;
+  color: #213547;
 }
 
 /* IMPORTANT : enlever le style "template Vite" */
@@ -21,6 +27,7 @@ body {
   padding: 0 !important;
   margin: 0 !important;
   text-align: left;
+  background-color: #ffffff;
 }
 
 /* Force PrimeVue à suivre */
@@ -49,9 +56,10 @@ button {
   font-size: 1em;
   font-weight: 500;
   font-family: inherit;
-  background-color: #1a1a1a;
+  background-color: #f9f9f9;
   cursor: pointer;
   transition: border-color 0.25s;
+  color: #213547;
 }
 button:hover {
   border-color: #646cff;
@@ -65,17 +73,6 @@ button:focus-visible {
   padding: 2em;
 }
 
-@media (prefers-color-scheme: light) {
-  :root {
-    color: #213547;
-    background-color: #ffffff;
-  }
-  a:hover {
-    color: #747bff;
-  }
-  button {
-    background-color: #f9f9f9;
-  }
-}
+/* Media query supprimé - mode clair forcé par défaut */
 
 

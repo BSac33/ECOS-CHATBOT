@@ -15,6 +15,13 @@ app.use(pinia)
 
 const router = createAppRouter(pinia)
 app.use(router)
-app.use(PrimeVue, { theme: { preset: Aura } })
+app.use(PrimeVue, { 
+  theme: { 
+    preset: Aura,
+    options: {
+      darkModeSelector: 'none' // Désactive le mode sombre automatique
+    }
+  } 
+})
 
 app.mount('#app')

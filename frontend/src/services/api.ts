@@ -139,6 +139,15 @@ class ApiService {
     return this.request<CaseInstructions>(`/api/cases/${id}/instructions`);
   }
 
+  async getActiveAttempt(caseId: number): Promise<Attempt | null> {
+    try {
+      return await this.request<Attempt>(`/chat/cases/${caseId}/active-attempt`);
+    } catch (error) {
+      // Si 404 ou autre erreur, pas d'attempt actif
+      return null;
+    }
+  }
+
   async createAttempt(caseId: number): Promise<Attempt> {
     return this.request<Attempt>('/chat/attempts', {
       method: 'POST',

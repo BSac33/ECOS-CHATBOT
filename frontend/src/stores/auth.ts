@@ -5,8 +5,7 @@ import { apiService } from '../services/api' // doit faire credentials: 'include
 export const useAuthStore = defineStore('auth', {
   state: () => ({
     user: null as any | null,
-    isHydrated: false,
-    isAuthenticated: false
+    isHydrated: false
   }),
   getters: {
     isAuthenticated: (s) => !!s.user,

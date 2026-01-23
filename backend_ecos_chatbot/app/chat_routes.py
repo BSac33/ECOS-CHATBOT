@@ -28,6 +28,46 @@ api_key = os.getenv("GEMINI_API_KEY")
 if not api_key:
     raise RuntimeError("GEMINI_API_KEY environment variable not set")
 
+@router.get("/cases/{case_id}/active-attempt", response_model=AttemptOut | None)
+async def get_active_attempt(case_id: int, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
+    """
+    Récupère l'attempt actif (non complété et non expiré) pour un cas et un utilisateur donné.
+    Retourne None s'il n'y en a pas.
+    """
+    logger.info(f"🔍 Recherche attempt actif pour cas {case_id} et user {user.id}")
+    
+    # Chercher un attempt non complété pour ce cas et cet utilisateur
+    stmt = select(Attempts).where(
+        Attempts.case_id == case_id,
+        Attempts.user_id == user.id,
+        Attempts.is_completed == False
+    ).order_by(Attempts.created_at.desc())
+    
+    attempt = session.exec(stmt).first()
+    
+    if not attempt:
+        logger.info(f"❌ Aucun attempt actif trouvé")
+        return None
+    
+    # Vérifier si l'attempt n'est pas expiré
+    now = datetime.utcnow()
+    if attempt.expires_at and now > attempt.expires_at:
+        logger.info(f"⏰ Attempt {attempt.id} expiré, finalisation automatique...")
+        # Auto-finaliser l'attempt expiré
+        attempt.is_completed = True
+        attempt.completed_at = attempt.expires_at
+        session.add(attempt)
+        session.commit()
+        return None
+    
+    logger.info(f"✅ Attempt actif trouvé : {attempt.id}")
+    return AttemptOut(
+        id=str(attempt.id),
+        case_id=attempt.case_id,
+        created_at=attempt.created_at.isoformat() if attempt.created_at else datetime.utcnow().isoformat(),
+        is_completed=attempt.is_completed,
+    )
+
 @router.post("/attempts", response_model=AttemptOut)
 async def create_attempt(payload: AttemptCreateIn, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
     logger.info(f"🆕 Création tentative pour le cas ID {payload.case_id}")
