@@ -14,7 +14,7 @@ from uuid import UUID
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
-from backend_ecos_chatbot.app.models import Attachment, AttachmentOut
+from models import Attachment, AttachmentOut
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)

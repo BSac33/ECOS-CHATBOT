@@ -242,22 +242,40 @@ async def chat(
     if not case.patient_prompt:
         raise HTTPException(500, "Station configurée sans patient_prompt")
     
+    # 1. Appel à l'arbitre (LLM)
     arbiter = classify_student_message_vllm_arbiter(case.attachments, payload.message)
-    
-    ## Réponse conditionnelle en fonction de l'arbitrage
-    if not arbiter: 
+    if not arbiter:
         raise HTTPException(500, "Erreur lors de l'arbitrage du message étudiant")
-    
-    if arbiter.safety.allow_to_transcript == False:
-        # Message bloqué pour raison de sécurité
-        blocked_reply = (
-            "Désolé, je ne peux pas répondre à cette question. "
-            "Si vous pensez que c'est une erreur, veuillez contacter l'administrateur."
-        )
+
+    # 2. Si le message est refusé (allow_to_transcript == False), ne rien stocker et retourner un message system explicite
+    if not arbiter["safety"]["allow_to_transcript"]:
+        # Personnalisation du message selon la catégorie
+        cat = arbiter.get("category", "OTHER")
+        if cat == "ABUSIVE":
+            reason = "Votre message a été bloqué car il a été détecté comme inapproprié, insultant ou hors charte ECOS. Merci de rester respectueux dans vos échanges."
+        elif cat == "OFF_TOPIC":
+            reason = "Votre message a été jugé hors sujet pour cette station ECOS. Merci de rester dans le cadre de la simulation."
+        else:
+            reason = "Votre message n'a pas pu être accepté par le système. Si vous pensez que c'est une erreur, contactez l'administrateur."
+        # Si un texte masqué est proposé, l'afficher
+        redacted = arbiter["safety"].get("redacted_text")
+        if redacted:
+            reason += f"\nVersion modérée proposée : {redacted}"
         return ChatOut(
-            patient_reply=blocked_reply,
+            patient_reply=reason,
             attachments=None
         )
+
+    # 3. Génération de la réponse patient selon la catégorie
+    cat = arbiter.get("category", "OTHER")
+    # Optionnel : comportement spécial selon la catégorie
+    if cat == "EXAM_REQUEST":
+        # On peut logguer ou traiter différemment si besoin
+        logger.info("L'étudiant a demandé un examen complémentaire : %s", arbiter["exam"])
+    elif cat == "EMPATHY":
+        logger.info("Message d'empathie détecté")
+    elif cat == "OFF_TOPIC":
+        logger.info("Message hors sujet mais accepté")
 
     # Générer la réponse du patient
     reply = generate_patient_reply(
@@ -265,33 +283,32 @@ async def chat(
         history=history,
         student_message=payload.message,
     )
-    
     logger.info(f"Réponse patient générée: {reply}")
 
-    # Écrire en DB en une transaction
+    # 4. Stockage en base UNIQUEMENT si le message est accepté
     student_msg = Message(
         attempt_id=attempt_id,
         role=ChatRole.student,
         content=payload.message,
     )
-    
     # Si des attachments ont été déclenchés, lier le premier au message
+    # matched_attachments doit être défini (sinon, à corriger plus tard)
+    try:
+        matched_attachments = find_matching_attachments(case.attachments, payload.message)
+    except Exception:
+        matched_attachments = []
     attachment_id = matched_attachments[0].id if matched_attachments else None
-    
     reply_msg = Message(
         attempt_id=attempt_id,
         role=ChatRole.patient,
         content=reply,
         attachment_id=attachment_id
     )
-
     session.add(student_msg)
     session.add(reply_msg)
     session.commit()
-
-    # 5) Retourner la réponse avec les UUIDs des attachments
+    # Retourner la réponse avec les UUIDs des attachments
     attachment_ids = [str(att.id) for att in matched_attachments] if matched_attachments else None
-
     return ChatOut(
         patient_reply=reply,
         attachments=attachment_ids
