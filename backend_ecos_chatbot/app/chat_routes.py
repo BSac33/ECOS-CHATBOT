@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from httpx import get
 from sqlmodel import Session, select
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -6,7 +7,7 @@ from db import get_session
 import os
 from models import ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, StationType, User
 from ai_chat_utils import generate_patient_reply
-from vllm_chat_utils import get_chat_completion_vllm
+from vllm_chat_utils import get_chat_completion_vllm, classify_student_message_vllm_arbiter, ArbiterOutput
 from attachment_routes import find_matching_attachments
 import logging 
 import asyncio
@@ -69,7 +70,10 @@ async def get_active_attempt(case_id: int, session: Session = Depends(get_sessio
     )
 
 @router.post("/attempts", response_model=AttemptOut)
-async def create_attempt(payload: AttemptCreateIn, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
+async def create_attempt(
+    payload: AttemptCreateIn, 
+    session: Session = Depends(get_session), 
+    user: User = Depends(check_authorization())):
     logger.info(f"🆕 Création tentative pour le cas ID {payload.case_id}")
 
     case = session.get(ClinicalCase, payload.case_id)
@@ -181,8 +185,14 @@ def get_time_remaining(
 
 
 @router.post("/attempts/{attempt_id}/chat", response_model=ChatOut)
-async def chat(attempt_id: UUID, payload: ChatIn, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
+async def chat(
+    attempt_id: UUID, 
+    payload: ChatIn, 
+    session: Session = Depends(get_session), 
+    user: User = Depends(check_authorization())):
+    
     attempt = session.get(Attempts, attempt_id)
+    
     if not attempt or attempt.user_id != user.id:
         raise HTTPException(404, "Attempt not found")
     if attempt.is_completed:
@@ -214,23 +224,6 @@ async def chat(attempt_id: UUID, payload: ChatIn, session: Session = Depends(get
 
     history = [{"role": r.role.value, "content": r.content} for r in history_rows if r.role != ChatRole.system]
 
-    # 2) Détecter si le message de l'étudiant déclenche des attachments
-    matched_attachments = find_matching_attachments(
-        message=payload.message,
-        case_id=case.id or 0,  # Fallback si None (ne devrait pas arriver)
-        db=session
-    )
-    
-    # Préparer le contexte pour le LLM avec les fichiers disponibles
-    attachment_context = ""
-    if matched_attachments:
-        attachment_context = "\n\n[EXAMENS DISPONIBLES]\n"
-        for att in matched_attachments:
-            attachment_context += f"- {att.display_name}"
-            if att.description:
-                attachment_context += f": {att.description}"
-            attachment_context += "\n"
-
     # Vérifier que la station nécessite une impersonation patient
     # Pour les stations d'analyse (exam_analysis, procedure), il n'y a PAS de conversation en temps réel
     requires_patient_impersonation = case.station_type in [
@@ -248,10 +241,27 @@ async def chat(attempt_id: UUID, payload: ChatIn, session: Session = Depends(get
     
     if not case.patient_prompt:
         raise HTTPException(500, "Station configurée sans patient_prompt")
+    
+    arbiter = classify_student_message_vllm_arbiter(case.attachments, payload.message)
+    
+    ## Réponse conditionnelle en fonction de l'arbitrage
+    if not arbiter: 
+        raise HTTPException(500, "Erreur lors de l'arbitrage du message étudiant")
+    
+    if arbiter.safety.allow_to_transcript == False:
+        # Message bloqué pour raison de sécurité
+        blocked_reply = (
+            "Désolé, je ne peux pas répondre à cette question. "
+            "Si vous pensez que c'est une erreur, veuillez contacter l'administrateur."
+        )
+        return ChatOut(
+            patient_reply=blocked_reply,
+            attachments=None
+        )
 
     # Générer la réponse du patient
     reply = generate_patient_reply(
-        patient_prompt=case.patient_prompt + attachment_context,
+        patient_prompt=case.patient_prompt,
         history=history,
         student_message=payload.message,
     )

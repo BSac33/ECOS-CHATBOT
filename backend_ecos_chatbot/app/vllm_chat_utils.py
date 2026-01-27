@@ -9,9 +9,12 @@ import os
 import logging
 import time
 import json
+from uuid import UUID
 
 from openai import OpenAI
 from pydantic import BaseModel, Field
+
+from backend_ecos_chatbot.app.models import Attachment, AttachmentOut
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -68,7 +71,6 @@ class ArbiterSafety(BaseModel):
     allow_to_transcript: bool = Field(description="Autoriser l'ajout du message au transcript")
     redact: bool = Field(description="Indique si un masquage est nécessaire")
     redacted_text: Optional[str] = Field(None, description="Texte masqué si nécessaire")
-
 
 class ArbiterOutput(BaseModel):
     category: Literal[
@@ -141,7 +143,7 @@ Si le message est insultant/haineux/harcelant, mets category=ABUSIVE, tone=INSUL
 Si ce n'est pas une question clinique explicite, ne mets pas CLINICAL_QUESTION.""".strip()
 
 
-def build_arbiter_user_prompt(attachment_names: List[str], student_message: str) -> str:
+def build_arbiter_user_prompt(attachment_names: List[AttachmentOut | None], student_message: str) -> str:
     attachments_block = "\n".join(f"- {name}" for name in attachment_names) or "- (aucun)"
     return f"""[ATTACHMENTS]
 {attachments_block}
@@ -150,18 +152,13 @@ def build_arbiter_user_prompt(attachment_names: List[str], student_message: str)
 {student_message}
 """.strip()
 
-
 def classify_student_message_vllm_arbiter(
-    attachment_names: List[str],
-    student_message: str,
-    base_url: Optional[str] = None,
-    model: Optional[str] = None,
-) -> dict:
+    attachment_names: List[Attachment],
+    student_message: str
+) -> ArbiterOutput | None:
     """Classifie un message étudiant via le modèle arbitre vLLM (JSON structuré)."""
-    if base_url is None:
-        base_url = os.getenv("VLLM_ARBITER_BASE_URL", "http://10.33.35.222:8002/v1")
-    if model is None:
-        model = os.getenv("VLLM_ARBITER_MODEL", "Qwen/Qwen2.5-3B-Instruct")
+    base_url = os.getenv("VLLM_ARBITER_BASE_URL", "http://10.33.35.222:8002/v1")
+    model = os.getenv("VLLM_ARBITER_MODEL", "Qwen/Qwen2.5-3B-Instruct")
 
     client = OpenAI(
         base_url=base_url,
@@ -263,7 +260,7 @@ def get_chat_completion_vllm(
         base_url=base_url,
         api_key="dummy-key"  # vLLM local ne nécessite pas de vraie clé
     )
-    
+
     logger.info(f"🤖 Envoi à vLLM ({base_url}), modèle: {model}")
     
     for attempt in range(MAX_RETRIES):

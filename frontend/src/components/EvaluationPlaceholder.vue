@@ -42,9 +42,10 @@ defineProps<{
     display: flex;
     justify-content: center;
     align-items: center;
-    min-height: 100vh;
+    min-height: 100%;
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-    padding: 2rem;
+    border: 2rem solid white;
+    padding: 1rem;
 }
 
 .content {
