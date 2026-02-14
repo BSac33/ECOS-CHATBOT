@@ -1,0 +1,83 @@
+version: '3.8'
+
+services:
+  # Modèle principal pour jouer le patient
+  vllm-qwen-7b:
+    image: vllm/vllm-openai:latest
+    env_file:
+      - vllm.env
+    container_name: vllm-qwen-7b
+    ports:
+      - "8001:8000"
+    volumes:
+      # Cache HF configurable via variable d'environnement (recommandé)
+      - ${HF_CACHE_DIR:-/mnt/userdata/data/benjamin.sacristan/huggingface-cache}:/root/.cache/huggingface
+    ipc: host
+    restart: unless-stopped
+    environment:
+      # Cluster perso: une seule L40S -> on utilise le GPU 0
+      - NVIDIA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=0
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+    # Réservation GPU compatible Docker Compose (plugin) / Swarm
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command:
+      - --model
+      - Qwen/Qwen2.5-7B-Instruct
+      - --dtype
+      - float16
+      - --max-model-len
+      - "32768"
+      # L40S (48GB) : marge de sécurité pour éviter l'OOM
+      - --gpu-memory-utilization
+      - "0.88"
+      - --tensor-parallel-size
+      - "1"
+      # Optionnel mais utile pour perfs/latence (à garder si supporté)
+      - --enable-prefix-caching
+
+  # Modèle arbitre pour analyse et filtrage des messages étudiants
+  # Sur une seule L40S, on le fait tourner sur le même GPU avec une conso réduite.
+  vllm-arbitre:
+    image: vllm/vllm-openai:latest
+    container_name: vllm-arbitre
+    env_file:
+      - vllm.env
+    ports:
+      - "8002:8000"
+    volumes:
+      - ${HF_CACHE_DIR:-/mnt/userdata/data/benjamin.sacristan/huggingface-cache}:/root/.cache/huggingface
+    ipc: host
+    restart: unless-stopped
+    depends_on:
+      - vllm-qwen-7b
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=0
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command:
+      - --model
+      - Qwen/Qwen2.5-3B-Instruct
+      - --dtype
+      - float16
+      - --max-model-len
+      - "8192"
+      # Conso GPU réduite pour cohabiter avec le 7B
+      - --gpu-memory-utilization
+      - "0.35"
+      - --tensor-parallel-size
+      - "1"
+      - --enable-prefix-caching
