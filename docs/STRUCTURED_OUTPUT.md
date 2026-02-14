@@ -189,12 +189,93 @@ evaluation -> items -> 0 -> points_awarded
 
 **Solution :** Vérifier que la grille d'évaluation ne contient pas de valeurs négatives.
 
+## � Intégration avec la Persistance
+
+### Sauvegarde en Base de Données
+
+Après validation Pydantic, l'évaluation est sauvegardée dans deux tables :
+
+```python
+# 1. Création de l'enregistrement principal
+evaluation_result = EvaluationResult(
+    attempt_id=attempt_id,
+    total_score=evaluation_data['total_score'],
+    total_possible=evaluation_data['total_possible'],
+    percentage=evaluation_data['percentage'],
+    overall_feedback=evaluation_data['general_feedback']
+)
+db.add(evaluation_result)
+db.flush()  # Obtenir l'ID
+
+# 2. Création des items individuels
+for item in evaluation_data['items']:
+    item_result = EvaluationItemResult(
+        evaluation_result_id=evaluation_result.id,
+        edn_code=item['item_id'],
+        item_name=item['criterion'],
+        points_obtained=item['points_awarded'],
+        points_possible=item['points_possible'],
+        justification=item['justification']
+    )
+    db.add(item_result)
+
+db.commit()
+```
+
+### Système de Caching
+
+```python
+# Vérification du cache avant génération
+existing = db.query(EvaluationResult).filter(
+    EvaluationResult.attempt_id == attempt_id
+).first()
+
+if existing:
+    # Retourner l'évaluation existante
+    return {
+        "evaluation": format_evaluation(existing),
+        "cached": True
+    }
+else:
+    # Générer nouvelle évaluation avec LLM
+    evaluation = await evaluate_with_llm(...)
+    save_to_database(evaluation)
+    return {
+        "evaluation": evaluation,
+        "cached": False
+    }
+```
+
+**Avantages** :
+- ✅ Évite les appels LLM redondants
+- ✅ Réponse instantanée si évaluation existe
+- ✅ Réduction des coûts d'inférence
+- ✅ Cohérence des résultats (même évaluation à chaque fois)
+
+### Mapping Frontend
+
+Le frontend mappe les noms de champs pour plus de clarté :
+
+```typescript
+// Backend → Frontend
+{
+  item_id: string          → edn_code: string
+  criterion: string        → item_name: string
+  points_awarded: number   → points_obtained: number
+  total_possible: number   → points_possible: number
+  general_feedback: string → overall_feedback: string
+}
+```
+
+Ce mapping est effectué dans `Debrief.vue` lors du chargement des données.
+
 ## 🚀 Évolutions futures possibles
 
 1. **Outlines avec grammaire CFG** (si besoin de plus de contrôle)
 2. **Validation sémantique** (ex: total_score = sum(items.points_awarded))
-3. **Caching des schémas** pour optimiser les performances
+3. ~~**Caching des évaluations**~~ ✅ **IMPLÉMENTÉ**
 4. **Streaming du JSON** pour les grandes évaluations
+5. **Versioning des évaluations** (suivi des modifications)
 
 ## 📚 Ressources
 

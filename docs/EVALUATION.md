@@ -84,6 +84,11 @@ L'évaluateur observe silencieusement la performance et remplit une grille d'év
 - La tentative doit être finalisée (`is_completed = true`)
 - Une grille d'évaluation active doit exister pour le cas
 
+**Système de Caching** :
+- Si une évaluation existe déjà pour cette tentative, elle est retournée immédiatement
+- Évite de re-générer l'évaluation à chaque appel
+- Optimise les performances et réduit les coûts d'inférence LLM
+
 **Retour** :
 ```json
 {
@@ -112,8 +117,12 @@ L'évaluateur observe silencieusement la performance et remplit une grille d'év
     "total_possible": 20.0,
     "percentage": 77.5,
     "general_feedback": "Bonne performance globale. L'interrogatoire est structuré et l'étudiant pose les questions essentielles. Points à améliorer : recherche systématique des facteurs de risque cardiovasculaires."
-  }
+  },
+  "cached": false
 }
+```
+
+**Note** : Le champ `cached` indique si l'évaluation provient du cache (true) ou a été générée (false)
 ```
 
 ### GET `/evaluation/attempts/{attempt_id}/transcript`
@@ -170,6 +179,151 @@ response_mime_type="application/json"  # Force le format structuré
 - Citer des passages précis pour justifier les points
 - Si un élément attendu n'apparaît pas → point non attribué
 - Feedback constructif et pédagogique
+
+## Frontend - Affichage des Résultats
+
+### Page Debrief (`frontend/src/Debrief.vue`)
+
+Page d'affichage des résultats d'évaluation après la finalisation d'une tentative.
+
+**Fonctionnalités** :
+- Récupération de l'évaluation via l'API
+- Affichage du score global avec pourcentage
+- Liste détaillée des items évalués
+- Feedback général de l'évaluateur
+- Liens vers les ressources EDN du cas clinique
+
+**Structure des données** :
+
+#### Interfaces TypeScript
+
+```typescript
+// Structure retournée par le LLM
+interface EvaluationItemRaw {
+  item_id: string
+  criterion: string
+  points_awarded: number
+  points_possible: number
+  is_validated: boolean
+  justification: string
+}
+
+interface EvaluationRaw {
+  items: EvaluationItemRaw[]
+  total_score: number
+  total_possible: number
+  percentage: number
+  general_feedback: string
+}
+
+interface EvaluationResponse {
+  evaluation: EvaluationRaw
+  cached?: boolean
+}
+
+// Structure mappée pour le frontend
+interface EvaluationItemData {
+  edn_code: string      // item_id → edn_code
+  item_name: string     // criterion → item_name
+  points_obtained: number  // points_awarded → points_obtained
+  points_possible: number
+  justification: string
+}
+
+interface EvaluationData {
+  total_score: number
+  points_possible: number  // total_possible → points_possible
+  overall_feedback: string // general_feedback → overall_feedback
+  items: EvaluationItemData[]
+}
+```
+
+#### Flux de données
+
+1. **Récupération des données** (3 appels API séquentiels) :
+   ```typescript
+   // 1. Récupération de l'évaluation
+   const evaluationResponse = await apiService.getAttemptEvaluation(attemptId)
+   
+   // 2. Récupération du transcript pour obtenir le case_id
+   const transcriptResponse = await apiService.getAttemptTranscript(attemptId)
+   
+   // 3. Récupération des détails du cas clinique
+   const caseResponse = await apiService.getClinicalCase(caseId)
+   ```
+
+2. **Mapping des données** :
+   ```typescript
+   evaluation.value = {
+     total_score: evalData.total_score,
+     points_possible: evalData.total_possible,
+     overall_feedback: evalData.general_feedback,
+     items: evalData.items.map(item => ({
+       edn_code: item.item_id,
+       item_name: item.criterion,
+       points_obtained: item.points_awarded,
+       points_possible: item.points_possible,
+       justification: item.justification
+     }))
+   }
+   ```
+
+### Composant EvaluationItem (`frontend/src/components/EvaluationItem.vue`)
+
+Composant réutilisable pour afficher un item d'évaluation individuel.
+
+**Props** :
+```typescript
+interface Props {
+  item: {
+    edn_code: string
+    item_name: string
+    points_obtained: number
+    points_possible: number
+    justification: string
+  }
+}
+```
+
+**Fonctionnalités** :
+- Icône de validation (✓ vert ou ✗ rouge) selon le seuil de 50%
+- Affichage des points obtenus / points possibles
+- Justification détaillée de l'évaluateur
+- Styling dynamique selon la validation
+
+### Layout et UX
+
+**Structure de la page** :
+```
+┌─────────────────────────────────────┐
+│  Titre du cas clinique             │  ← Header fixe
+├─────────────────────────────────────┤
+│  Score Global: 15.5/20 (77.5%)     │  ← Carte score fixe
+├─────────────────────────────────────┤
+│  ┌───────────────────────────────┐ │
+│  │ Item 1: ✓ 1.0/1.0            │ │  ← Zone scrollable
+│  │ Justification...              │ │   (items + feedback
+│  └───────────────────────────────┘ │    + ressources)
+│  ┌───────────────────────────────┐ │
+│  │ Item 2: ✗ 0.5/1.0            │ │
+│  │ Justification...              │ │
+│  └───────────────────────────────┘ │
+│  ┌───────────────────────────────┐ │
+│  │ Feedback Général              │ │
+│  │ Bonne performance...          │ │
+│  └───────────────────────────────┘ │
+│  ┌───────────────────────────────┐ │
+│  │ Pour Approfondir              │ │
+│  │ • cardio_001                  │ │
+│  │ • cardio_002                  │ │
+│  └───────────────────────────────┘ │
+└─────────────────────────────────────┘
+```
+
+**Scrolling** :
+- Header et score global fixes en haut
+- Contenu scrollable : `max-height: calc(100vh - 350px)`
+- Scrollbar personnalisée (8px width, couleurs subtiles)
 
 ## Exemples de Cas d'Usage
 
@@ -240,22 +394,42 @@ Format attendu dans la base de données :
 }
 ```
 
-## TODO : Améliorations Futures
+## Persistance des Évaluations
 
-### Sauvegarde des Évaluations
-Créer une table `EvaluationResults` pour persister les évaluations :
+### Tables de Base de Données
+
+Le système sauvegarde maintenant les évaluations dans deux tables :
+
+#### Table `evaluation_results`
 ```sql
 CREATE TABLE evaluation_results (
     id SERIAL PRIMARY KEY,
-    attempt_id INTEGER REFERENCES attempts(id),
-    evaluation_data JSONB,  -- Le JSON complet retourné par le LLM
-    total_score FLOAT,
-    total_possible FLOAT,
-    percentage FLOAT,
-    evaluated_at TIMESTAMP,
-    evaluated_by INTEGER REFERENCES users(id)
+    attempt_id UUID UNIQUE NOT NULL REFERENCES attempts(id),
+    total_score FLOAT NOT NULL,
+    total_possible FLOAT NOT NULL,
+    percentage FLOAT NOT NULL,
+    overall_feedback TEXT NOT NULL,
+    evaluated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 ```
+
+#### Table `evaluation_item_results`
+```sql
+CREATE TABLE evaluation_item_results (
+    id SERIAL PRIMARY KEY,
+    evaluation_result_id INTEGER REFERENCES evaluation_results(id) ON DELETE CASCADE,
+    edn_code VARCHAR(50) NOT NULL,
+    item_name TEXT NOT NULL,
+    points_obtained FLOAT NOT NULL,
+    points_possible FLOAT NOT NULL,
+    justification TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+✅ **IMPLÉMENTÉ** - Migration réalisée avec succès (voir section "Persistance des Évaluations")
 
 ### Endpoint pour Stations sans Chat
 Créer un endpoint dédié pour soumettre une réponse complète :
@@ -341,7 +515,8 @@ evaluation = evaluate_attempt_with_llm(
 |--------|---------------|-----------------|
 | Évaluateur en chat | ✅ Mode "correcteur" en temps réel | ❌ Supprimé (non réaliste) |
 | Évaluation | ❌ Pas implémentée | ✅ Post-examen avec grille |
+| Persistance | ❌ Pas de sauvegarde | ✅ Tables BDD + caching |
 | Stations sans patient | ⚠️ Mode évaluateur confus | ✅ Pas de chat, réponse unique |
-| Format de sortie | Texte libre | JSON structuré |
+| Format de sortie | Texte libre | JSON structuré (Pydantic) |
 | Justifications | Non | Oui, avec citations |
-| Fidélité ECOS | ⚠️ Partielle | ✅ Complète |
+| Affichage Frontend | ❌ Pas implémenté | ✅ Page Debrief complète |
