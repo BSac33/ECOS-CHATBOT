@@ -312,8 +312,8 @@ async function finalizeAttempt() {
 
         console.log('✅ Attempt finalisée avec succès');
         
-        // Rediriger vers l'évaluation
-        router.push(`/evaluation/${props.attemptId}`);
+        // Rediriger vers le débriefing
+        router.push(`/debrief/${props.attemptId}`);
 
     } catch (error) {
         console.error('Erreur lors de la finalisation:', error);

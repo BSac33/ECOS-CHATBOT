@@ -169,6 +169,16 @@ class ApiService {
       console.error('Erreur lors de la déconnexion:', error);
     }
   }
+
+  async getAttemptEvaluation(attemptId: string): Promise<any> {
+    return this.request<any>(`/evaluation/attempts/${attemptId}/evaluate`, {
+      method: 'POST',
+    });
+  }
+
+  async getAttemptTranscript(attemptId: string): Promise<any> {
+    return this.request<any>(`/evaluation/attempts/${attemptId}/transcript`);
+  }
 }
 
 export const apiService = new ApiService();

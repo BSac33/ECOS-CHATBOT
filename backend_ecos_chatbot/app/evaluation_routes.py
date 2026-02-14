@@ -9,6 +9,7 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from uuid import UUID
+from datetime import datetime
 from db import get_session
 from models import (
     ClinicalCase, 
@@ -16,6 +17,8 @@ from models import (
     Message, 
     EvaluationGrid,
     EvaluationOut,
+    EvaluationResult,
+    EvaluationItemResult,
     StationType
 )
 from ai_chat_utils import evaluate_attempt_with_llm
@@ -60,6 +63,16 @@ def evaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_s
             "La tentative doit être finalisée avant l'évaluation. "
             "Appelez d'abord POST /attempts/{attempt_id}/finalize"
         )
+    
+    # Vérifier si une évaluation existe déjà pour cette tentative
+    existing_eval_stmt = select(EvaluationResult).where(
+        EvaluationResult.attempt_id == attempt_id
+    )
+    existing_eval = session.exec(existing_eval_stmt).first()
+    
+    if existing_eval:
+        # Retourner l'évaluation existante directement sans recalcul
+        return existing_eval.evaluation_data
     
     # Récupérer le cas clinique
     case = session.get(ClinicalCase, attempt.case_id)
@@ -141,8 +154,43 @@ Contexte du scénario:
             f"Erreur lors de l'évaluation par le LLM: {str(e)}"
         )
     
-    # TODO: Sauvegarder le résultat de l'évaluation dans la base de données
-    # (créer une table EvaluationResults si nécessaire)
+    # Calculer les points obtenus et possibles pour les analytics
+    points_obtained = evaluation_result.get("total_score", 0.0)
+    points_possible = eval_grid.total_points
+    
+    # Sauvegarder le résultat de l'évaluation dans la base de données
+    # Créer une nouvelle évaluation
+    new_evaluation = EvaluationResult(
+        attempt_id=attempt_id,
+        case_id=case.id,
+        user_id=user_id,
+        evaluation_data=evaluation_result,
+        points_obtained=points_obtained,
+        points_possible=points_possible
+    )
+    session.add(new_evaluation)
+    session.commit()
+    session.refresh(new_evaluation)
+    evaluation_result_id = new_evaluation.id
+    
+    # Créer les résultats individuels pour chaque item
+    evaluation_items = evaluation_result.get("items", [])
+    for item in evaluation_items:
+        item_result = EvaluationItemResult(
+            evaluation_result_id=evaluation_result_id,
+            attempt_id=attempt_id,
+            case_id=case.id,
+            user_id=user_id,
+            edn_code=item.get("edn_code", ""),
+            item_name=item.get("item_name", ""),
+            points_obtained=item.get("points_obtained", 0.0),
+            points_possible=item.get("points_possible", 0.0),
+            justification=item.get("justification", ""),
+            evaluated_at=datetime.now()
+        )
+        session.add(item_result)
+    
+    session.commit()
     
     return evaluation_result
 

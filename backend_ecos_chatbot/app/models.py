@@ -370,3 +370,44 @@ class Attachment(SQLModel, table=True):
     trigger_keywords: Optional[str] = None  # Mots-clés pour détection automatique (séparés par ,)
     
     case: ClinicalCase = Relationship(back_populates="attachments")
+
+class EvaluationResult(SQLModel, table=True):
+    __tablename__ = "evaluation_results"
+    
+    id: Optional[int] = Field(default=None, primary_key=True)
+    attempt_id: UUID = Field(foreign_key="attempts.id", unique=True, index=True)
+    case_id: int = Field(foreign_key="clinical_cases.id", index=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    
+    # Résultat de l'évaluation au format JSON
+    evaluation_data: dict = Field(sa_column=Column(JSON, nullable=False))
+    
+    # Champs dénormalisés pour analytics SQL
+    points_obtained: float = Field(default=0.0, index=True)
+    points_possible: float = Field(default=0.0, index=True)
+    
+    # Métadonnées
+    created_at: datetime = Field(default_factory=datetime.now)
+    evaluated_at: datetime = Field(default_factory=datetime.now)
+
+class EvaluationItemResult(SQLModel, table=True):
+    """Stockage individuel des résultats de chaque item d'évaluation pour analytics granulaires."""
+    __tablename__ = "evaluation_item_results"
+    
+    id: Optional[int] = Field(default=None, primary_key=True)
+    evaluation_result_id: int = Field(foreign_key="evaluation_results.id", index=True)
+    attempt_id: UUID = Field(foreign_key="attempts.id", index=True)
+    case_id: int = Field(foreign_key="clinical_cases.id", index=True)
+    user_id: int = Field(foreign_key="users.id", index=True)
+    
+    # Identification de l'item
+    edn_code: str = Field(index=True)  # Code EDN pour regroupement (ex: "EDN 197")
+    item_name: str  # Nom de l'item évalué
+    
+    # Résultat
+    points_obtained: float = Field(index=True)
+    points_possible: float = Field(index=True)
+    justification: str  # Justification avec citations du transcript
+    
+    # Métadonnées
+    evaluated_at: datetime = Field(default_factory=datetime.now)
