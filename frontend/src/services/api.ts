@@ -50,6 +50,18 @@ export interface CaseInstructions {
   station_type: string;
 }
 
+export interface ExamAttachment {
+  id: string;
+  filename: string;
+  display_name: string;
+  kind: string;
+  mime_type: string;
+  size_bytes: number;
+  file_url: string;
+  uploaded_at: string;
+  show_at_start: boolean;
+}
+
 export const stationType : Record<string, string> = {
     "patient_interview": "Interrogatoire patient",
     "exam_analysis": "Analyse d'examens (radio, ECG, labo)",
@@ -57,6 +69,9 @@ export const stationType : Record<string, string> = {
     "diagnosis_announcement": "Annonce de diagnostic",
     "mixed": "Station mixte (ex: interrogatoire puis examen)"
 };
+
+/** Types de stations qui utilisent la vue réponse écrite (pas de chat patient) */
+export const WRITTEN_EXAM_STATION_TYPES = ['exam_analysis', 'procedure'];
 
 class ApiService {
   constructor() {
@@ -178,6 +193,23 @@ class ApiService {
 
   async getAttemptTranscript(attemptId: string): Promise<any> {
     return this.request<any>(`/evaluation/attempts/${attemptId}/transcript`);
+  }
+
+  async submitWrittenAnswer(attemptId: string, answer: string): Promise<any> {
+    return this.request<any>(`/chat/attempts/${attemptId}/submit-answer`, {
+      method: 'POST',
+      body: JSON.stringify({ answer }),
+    });
+  }
+
+  async getExamAttachments(attemptId: string): Promise<ExamAttachment[]> {
+    return this.request<ExamAttachment[]>(`/chat/attempts/${attemptId}/exam-attachments`);
+  }
+
+  async finalizeAttempt(attemptId: string): Promise<any> {
+    return this.request<any>(`/chat/attempts/${attemptId}/finalize`, {
+      method: 'POST',
+    });
   }
 }
 

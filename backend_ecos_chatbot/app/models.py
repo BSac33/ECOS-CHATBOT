@@ -21,6 +21,9 @@ class AttemptOut(BaseModel):
 class ChatIn(BaseModel):
     message: str
 
+class WrittenAnswerIn(BaseModel):
+    answer: str
+
 class ChatOut(BaseModel):
     patient_reply: str
     attachments: Optional[List[str]] = None  # UUIDs des fichiers attachés
@@ -41,6 +44,7 @@ class AttachmentOut(BaseModel):
     size_bytes: int
     file_url: str
     uploaded_at: str
+    show_at_start: bool = False
 
 class EvaluationItemOut(BaseModel):
     """Un item individuel de la grille d'évaluation avec le résultat"""
@@ -367,6 +371,7 @@ class Attachment(SQLModel, table=True):
     # Métadonnées
     uploaded_at: datetime = Field(default_factory=datetime.now)
     is_available_during_case: bool = Field(default=True)  # Disponible pendant l'examen ?
+    show_at_start: bool = Field(default=False)  # Iconographie affichée dès le début (stations écrites)
     trigger_keywords: Optional[str] = None  # Mots-clés pour détection automatique (séparés par ,)
     
     case: ClinicalCase = Relationship(back_populates="attachments")

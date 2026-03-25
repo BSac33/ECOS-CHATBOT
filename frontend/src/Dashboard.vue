@@ -2,7 +2,7 @@
   import { onMounted, ref } from 'vue';
   import { useAuthStore } from './stores/auth';
   import type { CaseInstructions, ClinicalCase } from './services/api';
-  import { stationType } from './services/api';
+  import { stationType, WRITTEN_EXAM_STATION_TYPES } from './services/api';
   import { apiService } from './services/api';
   import Card from 'primevue/card';
   import Button from 'primevue/button';
@@ -32,21 +32,30 @@
     popupContent.value = await apiService.getCaseInstructions(caseId);
   }
 
+  function getAttemptRoute(stationTypeValue: string, attemptId: string): string {
+    return WRITTEN_EXAM_STATION_TYPES.includes(stationTypeValue)
+      ? `/written-exam/${attemptId}`
+      : `/chat/${attemptId}`;
+  }
+
   async function createAttempt(caseId: number) {
     try {
+      // Récupérer le type de station pour le routage
+      const caseItem = caseList.value.find(c => c.id === caseId);
+
       // Vérifier d'abord s'il existe un attempt actif
       const activeAttempt = await apiService.getActiveAttempt(caseId);
-      
+
       if (activeAttempt) {
         console.log('✅ Attempt actif trouvé, redirection...');
-        router.push(`/chat/${activeAttempt.id}`);
+        router.push(getAttemptRoute(caseItem?.station_type ?? '', activeAttempt.id));
         return;
       }
-      
+
       // Sinon, créer un nouvel attempt
       console.log('🆕 Création d\'un nouvel attempt...');
       const attempt = await apiService.createAttempt(caseId);
-      router.push(`/chat/${attempt.id}`);
+      router.push(getAttemptRoute(caseItem?.station_type ?? '', attempt.id));
 
     } catch (error) {
       console.error('Erreur lors de la création de la tentative :', error);

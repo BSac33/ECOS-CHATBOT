@@ -97,30 +97,41 @@ def evaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_s
         Message.attempt_id == attempt_id
     ).order_by(Message.created_at)
     messages = session.exec(messages_stmt).all()
-    
-    print(messages)
-    
-    if not messages:
-        raise HTTPException(
-            400, 
-            "Aucun message dans cette tentative. Impossible d'évaluer."
-        )
-    
-    # Construire le transcript (en filtrant les commandes)
+
+    # Construire le transcript (en filtrant les commandes et messages system)
     transcript_parts = []
-    
+
     for msg in messages:
         # Filtrer les commandes CLI (/end, /finalize, etc.)
         if msg.content.startswith('/'):
             continue
-            
+
         if msg.role.value == "student":
             transcript_parts.append(f"ÉTUDIANT: {msg.content}")
         elif msg.role.value == "patient":
             transcript_parts.append(f"PATIENT: {msg.content}")
         # On ignore les messages system
-    
+
     transcript = "\n\n".join(transcript_parts)
+
+    # Vérifier que le transcript n'est pas vide
+    # Pour les stations écrites (exam_analysis, procedure), le transcript contient
+    # uniquement la réponse de l'étudiant soumise via /submit-answer
+    if not transcript.strip():
+        station_type = case.station_type.value
+        written_types = ["exam_analysis", "procedure"]
+        if station_type in written_types:
+            raise HTTPException(
+                400,
+                "Aucune réponse soumise. "
+                "Pour les stations écrites, soumettez votre réponse via "
+                "POST /attempts/{id}/submit-answer avant d'évaluer."
+            )
+        else:
+            raise HTTPException(
+                400,
+                "Aucun échange dans cette tentative. Impossible d'évaluer."
+            )
     
     # Préparer le contexte du cas
     case_context = f"""

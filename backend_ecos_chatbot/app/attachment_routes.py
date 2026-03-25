@@ -66,6 +66,7 @@ async def upload_attachment(
     description: Optional[str] = Form(None),
     trigger_keywords: Optional[str] = Form(None),
     is_available_during_case: bool = Form(True),
+    show_at_start: bool = Form(False),
     db: Session = Depends(get_session)
 ):
     """
@@ -133,6 +134,7 @@ async def upload_attachment(
         file_path=file_path,
         file_url=file_url,
         is_available_during_case=is_available_during_case,
+        show_at_start=show_at_start,
         trigger_keywords=trigger_keywords
     )
     
@@ -167,7 +169,8 @@ async def get_attachment_info(
         mime_type=attachment.mime_type,
         size_bytes=attachment.size_bytes,
         file_url=attachment.file_url,
-        uploaded_at=attachment.uploaded_at.isoformat()
+        uploaded_at=attachment.uploaded_at.isoformat(),
+        show_at_start=attachment.show_at_start,
     )
 
 
@@ -194,7 +197,8 @@ async def get_case_attachments(
             mime_type=a.mime_type,
             size_bytes=a.size_bytes,
             file_url=a.file_url,
-            uploaded_at=a.uploaded_at.isoformat()
+            uploaded_at=a.uploaded_at.isoformat(),
+            show_at_start=a.show_at_start,
         )
         for a in attachments
     ]

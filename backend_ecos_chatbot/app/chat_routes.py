@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from uuid import UUID
 from db import get_session
 import os
-from models import ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, StationType, User
+from models import ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, WrittenAnswerIn, StationType, User, Attachment, AttachmentOut
 from ai_chat_utils import generate_patient_reply
 from vllm_chat_utils import get_chat_completion_vllm, classify_student_message_vllm_arbiter, ArbiterOutput
 from attachment_routes import find_matching_attachments
@@ -313,6 +313,110 @@ async def chat(
         patient_reply=reply,
         attachments=attachment_ids
     )
+
+@router.post("/attempts/{attempt_id}/submit-answer")
+def submit_written_answer(
+    attempt_id: UUID,
+    payload: WrittenAnswerIn,
+    session: Session = Depends(get_session),
+    user: User = Depends(check_authorization())
+):
+    """
+    Soumet la réponse écrite d'un étudiant pour les stations sans chat patient
+    (exam_analysis, procedure). Stocke la réponse comme message étudiant.
+
+    Peut être appelé plusieurs fois : la réponse précédente est remplacée.
+    """
+    attempt = session.get(Attempts, attempt_id)
+    if not attempt or attempt.user_id != user.id:
+        raise HTTPException(404, "Attempt not found")
+    if attempt.is_completed:
+        raise HTTPException(400, "Attempt already completed")
+
+    case = session.get(ClinicalCase, attempt.case_id)
+    if not case:
+        raise HTTPException(500, "Case missing")
+
+    # Vérifier que ce type de station accepte les réponses écrites
+    written_station_types = [StationType.exam_analysis, StationType.procedure]
+    if case.station_type not in written_station_types:
+        raise HTTPException(
+            400,
+            "Cette station nécessite un chat patient, pas une réponse écrite. "
+            "Utilisez POST /attempts/{id}/chat."
+        )
+
+    if not payload.answer.strip():
+        raise HTTPException(400, "La réponse ne peut pas être vide.")
+
+    # Vérifier le temps
+    now = datetime.utcnow()
+    if attempt.expires_at and now > attempt.expires_at:
+        attempt.is_completed = True
+        attempt.completed_at = attempt.expires_at
+        session.add(attempt)
+        session.commit()
+        raise HTTPException(408, "Le temps imparti est écoulé. La session a été finalisée.")
+
+    # Supprimer toute réponse écrite précédente (pour permettre la mise à jour)
+    existing_stmt = select(Message).where(
+        Message.attempt_id == attempt_id,
+        Message.role == ChatRole.student
+    )
+    existing_answers = session.exec(existing_stmt).all()
+    for msg in existing_answers:
+        session.delete(msg)
+    session.commit()
+
+    # Enregistrer la nouvelle réponse
+    answer_msg = Message(
+        attempt_id=attempt_id,
+        role=ChatRole.student,
+        content=payload.answer,
+        created_at=datetime.utcnow()
+    )
+    session.add(answer_msg)
+    session.commit()
+
+    return {"status": "ok", "message": "Réponse enregistrée avec succès."}
+
+
+@router.get("/attempts/{attempt_id}/exam-attachments", response_model=list[AttachmentOut])
+def get_exam_attachments(
+    attempt_id: UUID,
+    session: Session = Depends(get_session),
+    user: User = Depends(check_authorization())
+):
+    """
+    Récupère les pièces jointes iconographiques (show_at_start=True) pour une tentative.
+    Utilisé par les stations écrites (exam_analysis, procedure) pour afficher
+    l'iconographie au début de l'examen.
+    """
+    attempt = session.get(Attempts, attempt_id)
+    if not attempt or attempt.user_id != user.id:
+        raise HTTPException(404, "Attempt not found")
+
+    stmt = select(Attachment).where(
+        Attachment.case_id == attempt.case_id,
+        Attachment.show_at_start == True
+    )
+    attachments = session.exec(stmt).all()
+
+    return [
+        AttachmentOut(
+            id=str(a.id),
+            filename=a.filename,
+            display_name=a.display_name,
+            kind=a.kind,
+            mime_type=a.mime_type,
+            size_bytes=a.size_bytes or 0,
+            file_url=a.file_url,
+            uploaded_at=a.uploaded_at.isoformat(),
+            show_at_start=a.show_at_start,
+        )
+        for a in attachments
+    ]
+
 
 @router.post("/attempts/{attempt_id}/finalize")
 def finalize_attempt(attempt_id: UUID, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
