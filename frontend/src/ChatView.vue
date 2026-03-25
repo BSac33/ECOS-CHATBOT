@@ -140,78 +140,93 @@ async function loadMessages() {
 }
 
 /**
- * Gère l'envoi d'un nouveau message depuis le composant Textbox
- * Implémente une mise à jour optimiste pour une UX réactive
- * 
- * @param messageContent - Le contenu du message saisi par l'étudiant
+ * Gère l'envoi d'un nouveau message depuis le composant Textbox.
+ * Utilise l'endpoint SSE /chat/stream pour afficher la réponse token par token.
  */
 async function handleSendMessage(messageContent: string) {
     if (!messageContent.trim() || isSendingMessage.value) {
         return;
     }
-    
+
+    isSendingMessage.value = true;
+
+    // Ajout optimiste du message étudiant
+    const studentMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'student',
+        content: messageContent,
+        created_at: new Date().toISOString()
+    };
+    messages.value.push(studentMessage);
+    await scrollToBottom();
+
+    // Placeholder pour la réponse patient (rempli progressivement)
+    isPatientTyping.value = true;
+    const patientMessage: ChatMessage = {
+        id: crypto.randomUUID(),
+        role: 'patient',
+        content: '',
+        created_at: new Date().toISOString()
+    };
+
     try {
-        isSendingMessage.value = true;
-        
-        // ===== MISE À JOUR OPTIMISTE =====
-        // Créer immédiatement le message de l'étudiant dans l'UI
-        // sans attendre la réponse du serveur
-        const studentMessage: ChatMessage = {
-            id: crypto.randomUUID(), // ID temporaire
-            role: 'student',
-            content: messageContent,
-            created_at: new Date().toISOString()
-        };
-        
-        // Ajouter à l'array réactive (mise à jour immédiate de l'UI)
-        messages.value.push(studentMessage);
-        await scrollToBottom();
-        
-        // ===== APPEL API =====
-        // Activer l'indicateur de frappe pendant l'attente
-        isPatientTyping.value = true;
-        
-        // POST /chat/attempts/{attemptId}/chat
-        const response = await fetch(`/chat/attempts/${attemptId}/chat`, {
+        const response = await fetch(`/chat/attempts/${attemptId}/chat/stream`, {
             method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
+            headers: { 'Content-Type': 'application/json' },
             credentials: 'include',
             body: JSON.stringify({ message: messageContent })
         });
-        
+
         if (!response.ok) {
             const error = await response.json().catch(() => ({ detail: 'Erreur réseau' }));
-            throw new Error(error.detail || 'Erreur lors de l\'envoi du message');
+            throw new Error(error.detail || `Erreur ${response.status}`);
         }
-        
-        const chatResponse: ChatResponse = await response.json();
-        
-        // ===== AJOUTER LA RÉPONSE DU PATIENT =====
-        const patientMessage: ChatMessage = {
-            id: crypto.randomUUID(), // ID unique pour la réponse
-            role: 'patient',
-            content: chatResponse.patient_reply,
-            created_at: new Date().toISOString()
-        };
-        
+
+        // Ajouter le message patient vide, on le remplit au fur et à mesure
         messages.value.push(patientMessage);
-        await scrollToBottom();
-        
-        // TODO: Gérer les attachments si présents
-        // if (chatResponse.attachments) { ... }
-        
+        isPatientTyping.value = false;
+
+        const reader = response.body!.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+            const lines = buffer.split('\n');
+            buffer = lines.pop() ?? '';
+
+            for (const line of lines) {
+                if (!line.startsWith('data: ')) continue;
+                const raw = line.slice(6).trim();
+                if (!raw) continue;
+
+                try {
+                    const event = JSON.parse(raw);
+                    if (event.type === 'token') {
+                        patientMessage.content += event.content;
+                        await scrollToBottom();
+                    } else if (event.type === 'done') {
+                        // La réponse complète est déjà dans patientMessage.content
+                        // (accumulée via les tokens)
+                    } else if (event.type === 'error') {
+                        throw new Error(event.detail || 'Erreur serveur SSE');
+                    }
+                } catch (parseErr) {
+                    console.warn('SSE parse error:', parseErr);
+                }
+            }
+        }
+
     } catch (error) {
         console.error('Erreur lors de l\'envoi du message:', error);
-        
-        // En cas d'erreur, on pourrait :
-        // - Retirer le message optimiste de l'array
-        // - Afficher un indicateur d'erreur sur le message
-        // - Permettre un retry
-        
+        // Retirer le message patient vide s'il a été ajouté
+        if (messages.value[messages.value.length - 1]?.id === patientMessage.id) {
+            messages.value.pop();
+        }
         alert(`Erreur: ${error instanceof Error ? error.message : 'Erreur inconnue'}`);
-        
     } finally {
         isSendingMessage.value = false;
         isPatientTyping.value = false;

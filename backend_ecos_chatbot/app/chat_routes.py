@@ -1,17 +1,19 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from httpx import get
 from sqlmodel import Session, select
 from datetime import datetime, timedelta
 from uuid import UUID
 from db import get_session
 import os
+import json
 from models import ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, WrittenAnswerIn, StationType, User, Attachment, AttachmentOut
 from ai_chat_utils import generate_patient_reply
-from vllm_chat_utils import get_chat_completion_vllm, classify_student_message_vllm_arbiter, ArbiterOutput
+from vllm_chat_utils import get_chat_completion_vllm, classify_student_message_vllm_arbiter, generate_patient_reply_vllm_stream, ArbiterOutput
 from attachment_routes import find_matching_attachments
-import logging 
+import logging
 import asyncio
-from auth import check_authorization 
+from auth import check_authorization
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -242,53 +244,55 @@ async def chat(
     if not case.patient_prompt:
         raise HTTPException(500, "Station configurée sans patient_prompt")
     
-    # 1. Appel à l'arbitre (LLM)
-    arbiter = classify_student_message_vllm_arbiter(case.attachments, payload.message)
-    if not arbiter:
-        raise HTTPException(500, "Erreur lors de l'arbitrage du message étudiant")
+    # 1 + 3. Arbitre ET réponse patient en PARALLÈLE (asyncio.to_thread)
+    # L'arbitre (modèle léger, ~1s) et la génération patient (modèle principal, ~3-5s)
+    # tournent simultanément. Si l'arbitre bloque le message, la réponse patient est
+    # simplement ignorée. Politique fail-open : tout erreur de l'arbitre → on laisse passer.
+    _ARBITER_FALLBACK = {
+        "category": "OTHER", "tone": "NEUTRAL",
+        "exam": {"requested": False, "label": None, "confidence": None},
+        "safety": {"allow_to_transcript": True, "redact": False, "redacted_text": None}
+    }
+    _REPLY_FALLBACK = "Je n'ai pas bien entendu, pouvez-vous répéter ?"
+
+    logger.info("⚡ Lancement parallèle : arbitre + génération patient")
+    results = await asyncio.gather(
+        asyncio.to_thread(classify_student_message_vllm_arbiter, case.attachments, payload.message),
+        asyncio.to_thread(generate_patient_reply, case.patient_prompt, history, payload.message),
+        return_exceptions=True
+    )
+
+    arbiter = results[0] if not isinstance(results[0], Exception) else _ARBITER_FALLBACK
+    reply   = results[1] if not isinstance(results[1], Exception) else _REPLY_FALLBACK
+
+    if isinstance(results[0], Exception):
+        logger.warning(f"⚠️ Arbitre en erreur, fail-open: {results[0]}")
+    if isinstance(results[1], Exception):
+        logger.error(f"❌ Génération patient en erreur: {results[1]}")
 
     # 2. Évaluer la décision de blocage — politique fail-open
-    # On ne bloque que sur du contenu clairement abusif (insultes) ou des tentatives
-    # d'exfiltration avérées (META + demande explicite de grille/prompt/scénario).
-    # En cas de doute (mauvaise classification, message médical borderline), on laisse passer.
     cat = arbiter.get("category", "OTHER")
     arbiter_blocks = not arbiter["safety"]["allow_to_transcript"]
-
-    # Blocage strict : seulement ABUSIVE ou META avec exfiltration réelle
-    is_hard_block = arbiter_blocks and cat in ("ABUSIVE",)
-    # META sans exfiltration avérée → on avertit mais on passe quand même
+    is_hard_block      = arbiter_blocks and cat == "ABUSIVE"
     is_meta_exfiltration = arbiter_blocks and cat == "META"
 
     if is_hard_block:
-        reason = "Votre message a été bloqué car il a été détecté comme insultant, menaçant ou hors charte ECOS. Merci de rester respectueux dans vos échanges."
-        return ChatOut(patient_reply=reason, attachments=None)
+        return ChatOut(
+            patient_reply="Votre message a été bloqué car il a été détecté comme insultant ou menaçant. Merci de rester respectueux.",
+            attachments=None
+        )
 
     if is_meta_exfiltration:
-        # Signaler la tentative de triche sans bloquer l'examen
-        logger.warning(f"⚠️ Tentative META/exfiltration détectée: {payload.message[:80]}")
-        reason = (
-            "Le patient ne peut pas vous répondre à cette question. "
-            "Restez dans le cadre de la simulation clinique."
+        logger.warning(f"⚠️ Tentative META/exfiltration: {payload.message[:80]}")
+        return ChatOut(
+            patient_reply="Le patient ne peut pas répondre à cette question. Restez dans le cadre de la simulation clinique.",
+            attachments=None
         )
-        return ChatOut(patient_reply=reason, attachments=None)
 
-    # 3. Génération de la réponse patient selon la catégorie
-    # Optionnel : comportement spécial selon la catégorie
     if cat == "EXAM_REQUEST":
-        # On peut logguer ou traiter différemment si besoin
-        logger.info("L'étudiant a demandé un examen complémentaire : %s", arbiter["exam"])
-    elif cat == "EMPATHY":
-        logger.info("Message d'empathie détecté")
-    elif cat == "OFF_TOPIC":
-        logger.info("Message hors sujet mais accepté")
+        logger.info("Demande d'examen complémentaire : %s", arbiter["exam"])
 
-    # Générer la réponse du patient
-    reply = generate_patient_reply(
-        patient_prompt=case.patient_prompt,
-        history=history,
-        student_message=payload.message,
-    )
-    logger.info(f"Réponse patient générée: {reply}")
+    logger.info(f"✅ Réponse patient ({len(reply)} car.) | catégorie={cat}")
 
     # 4. Stockage en base UNIQUEMENT si le message est accepté
     student_msg = Message(
@@ -318,6 +322,142 @@ async def chat(
         patient_reply=reply,
         attachments=attachment_ids
     )
+
+@router.post("/attempts/{attempt_id}/chat/stream")
+async def chat_stream(
+    attempt_id: UUID,
+    payload: ChatIn,
+    session: Session = Depends(get_session),
+    user: User = Depends(check_authorization())
+):
+    """
+    Endpoint SSE : stream la réponse patient token par token.
+    Format SSE :
+      data: {"type":"token","content":"..."}\n\n
+      data: {"type":"done","patient_reply":"...","attachments":null}\n\n
+      data: {"type":"error","detail":"..."}\n\n
+    """
+    attempt = session.get(Attempts, attempt_id)
+    if not attempt or attempt.user_id != user.id:
+        raise HTTPException(404, "Attempt not found")
+    if attempt.is_completed:
+        raise HTTPException(400, "Attempt already completed")
+
+    case = session.get(ClinicalCase, attempt.case_id)
+    if not case:
+        raise HTTPException(500, "Case missing (DB integrity error)")
+
+    now = datetime.utcnow()
+    if attempt.expires_at and now > attempt.expires_at:
+        attempt.is_completed = True
+        attempt.completed_at = attempt.expires_at
+        session.add(attempt)
+        session.commit()
+        raise HTTPException(408, f"Le temps imparti est écoulé.")
+
+    requires_patient_impersonation = case.station_type in [
+        StationType.patient_interview,
+        StationType.diagnosis_announcement,
+        StationType.mixed
+    ]
+    if not requires_patient_impersonation:
+        raise HTTPException(400, "Cette station ne supporte pas le chat en temps réel.")
+    if not case.patient_prompt:
+        raise HTTPException(500, "Station configurée sans patient_prompt")
+
+    stmt = select(Message).where(Message.attempt_id == attempt_id).order_by(Message.created_at)
+    history_rows = session.exec(stmt).all()
+    history = [{"role": r.role.value, "content": r.content} for r in history_rows if r.role != ChatRole.system]
+
+    # Détacher les données nécessaires pour éviter les erreurs de session en dehors de la requête
+    patient_prompt = case.patient_prompt
+    case_attachments = list(case.attachments)
+    message_text = payload.message
+
+    _ARBITER_FALLBACK = {
+        "category": "OTHER", "tone": "NEUTRAL",
+        "exam": {"requested": False, "label": None, "confidence": None},
+        "safety": {"allow_to_transcript": True, "redact": False, "redacted_text": None}
+    }
+
+    async def event_stream():
+        # 1. Arbitre en parallèle avec première partie du streaming
+        arbiter_task = asyncio.create_task(
+            asyncio.to_thread(classify_student_message_vllm_arbiter, case_attachments, message_text)
+        )
+
+        # 2. Attendre l'arbitre (rapide ~1-2s) avant de streamer
+        try:
+            arbiter = await arbiter_task
+        except Exception as e:
+            logger.warning(f"⚠️ Arbitre en erreur, fail-open: {e}")
+            arbiter = _ARBITER_FALLBACK
+
+        cat = arbiter.get("category", "OTHER")
+        arbiter_blocks = not arbiter["safety"]["allow_to_transcript"]
+        is_hard_block = arbiter_blocks and cat == "ABUSIVE"
+        is_meta_exfiltration = arbiter_blocks and cat == "META"
+
+        if is_hard_block:
+            msg = "Votre message a été bloqué car il a été détecté comme insultant ou menaçant. Merci de rester respectueux."
+            yield f"data: {json.dumps({'type': 'done', 'patient_reply': msg, 'attachments': None})}\n\n"
+            return
+
+        if is_meta_exfiltration:
+            logger.warning(f"⚠️ Tentative META/exfiltration: {message_text[:80]}")
+            msg = "Le patient ne peut pas répondre à cette question. Restez dans le cadre de la simulation clinique."
+            yield f"data: {json.dumps({'type': 'done', 'patient_reply': msg, 'attachments': None})}\n\n"
+            return
+
+        # 3. Streamer la réponse patient token par token via queue async
+        loop = asyncio.get_running_loop()
+        q: asyncio.Queue = asyncio.Queue()
+
+        def run_stream():
+            try:
+                for chunk in generate_patient_reply_vllm_stream(patient_prompt, history, message_text):
+                    loop.call_soon_threadsafe(q.put_nowait, chunk)
+            except Exception as exc:
+                loop.call_soon_threadsafe(q.put_nowait, exc)
+            finally:
+                loop.call_soon_threadsafe(q.put_nowait, None)  # sentinel
+
+        stream_future = loop.run_in_executor(None, run_stream)
+
+        full_reply = ""
+        while True:
+            item = await q.get()
+            if item is None:
+                break
+            if isinstance(item, Exception):
+                logger.error(f"❌ Erreur streaming patient: {item}")
+                if not full_reply:
+                    full_reply = "Je n'ai pas bien entendu, pouvez-vous répéter ?"
+                    yield f"data: {json.dumps({'type': 'token', 'content': full_reply})}\n\n"
+                break
+            full_reply += item
+            yield f"data: {json.dumps({'type': 'token', 'content': item})}\n\n"
+
+        await stream_future
+
+        # 4. Persister en base
+        try:
+            matched_attachments = find_matching_attachments(case_attachments, message_text)
+        except Exception:
+            matched_attachments = []
+        attachment_id = matched_attachments[0].id if matched_attachments else None
+        attachment_ids = [str(att.id) for att in matched_attachments] if matched_attachments else None
+
+        student_msg = Message(attempt_id=attempt_id, role=ChatRole.student, content=message_text)
+        reply_msg = Message(attempt_id=attempt_id, role=ChatRole.patient, content=full_reply, attachment_id=attachment_id)
+        session.add(student_msg)
+        session.add(reply_msg)
+        session.commit()
+
+        yield f"data: {json.dumps({'type': 'done', 'patient_reply': full_reply, 'attachments': attachment_ids})}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
 
 @router.post("/attempts/{attempt_id}/submit-answer")
 def submit_written_answer(

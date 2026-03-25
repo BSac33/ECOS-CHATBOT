@@ -423,7 +423,7 @@ def generate_patient_reply_vllm(
                 model=model,
                 messages=messages,
                 temperature=0.4,
-                max_tokens=160,
+                max_tokens=100,
                 top_p=0.9
             )
             
@@ -451,6 +451,46 @@ def generate_patient_reply_vllm(
             else:
                 logger.error(f"❌ Échec après {MAX_RETRIES} tentatives: {e}")
                 raise
+
+
+def generate_patient_reply_vllm_stream(
+    patient_prompt: str,
+    history: List[Dict[str, str]],
+    student_message: str,
+    base_url: Optional[str] = None,
+    model: Optional[str] = None,
+):
+    """Génère une réponse patient via vLLM en mode streaming. Yields text chunks."""
+
+    if base_url is None:
+        base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8001/v1")
+    if model is None:
+        model = os.getenv("VLLM_MODEL", "mistralai/Ministral-8B-Instruct-2410")
+
+    client = OpenAI(base_url=base_url, api_key="dummy-key")
+    system_instruction = build_patient_system_instruction(patient_prompt)
+
+    messages = [{"role": "system", "content": system_instruction}]
+    for msg in history:
+        if msg["role"] == "student":
+            messages.append({"role": "user", "content": msg["content"]})
+        elif msg["role"] == "patient":
+            messages.append({"role": "assistant", "content": msg["content"]})
+    messages.append({"role": "user", "content": student_message})
+
+    logger.info("🌊 Streaming réponse patient via vLLM")
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=0.4,
+        max_tokens=100,
+        top_p=0.9,
+        stream=True,
+    )
+    for chunk in stream:
+        delta = chunk.choices[0].delta.content if chunk.choices else None
+        if delta:
+            yield delta
 
 
 def evaluate_attempt_with_vllm(
