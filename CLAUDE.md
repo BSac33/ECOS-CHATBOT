@@ -299,7 +299,9 @@ Set `LLM_PROVIDER=vllm` in `fastapi.env` and configure vLLM endpoint. The code a
 - `docs/EVALUATION.md` - Comprehensive evaluation system documentation
 - `docs/STRUCTURED_OUTPUT.md` - Pydantic structured output implementation
 - `docs/STATION_TYPES.md` - Station type definitions
-- `docs/ATTACHMENTS.md` - File attachment system
+- `docs/ATTACHMENTS.md` - File attachment system (includes `show_at_start` for iconography)
+- `docs/WRITTEN_EXAM.md` - Written exam stations (exam_analysis, procedure) — frontend/API workflow
+- `docs/SSE_STREAMING.md` - SSE streaming endpoint for patient chat (latency optimization)
 - `docs/USER_ROUTES.md` - User API documentation
 - `docs/POSTGRESQL_SETUP.md` - Database setup guide
 - `docs/FRONTEND_DEBRIEF.md` - Debrief page implementation

@@ -39,7 +39,23 @@ Content-Type: multipart/form-data
   "display_name": "Électrocardiogramme",
   "description": "ECG 12 dérivations, rythme sinusal",
   "trigger_keywords": "ecg,électrocardiogramme,électro,cardiogramme",
-  "is_available_during_case": true
+  "show_at_start": false
+}
+```
+
+**Champ `show_at_start` :**
+- `false` (défaut) : attachment déclenché par `trigger_keywords` dans le chat
+- `true` : attachment affiché dès le début, utilisé pour l'iconographie des stations écrites (`exam_analysis`, `procedure`)
+
+Pour l'iconographie des stations d'examen écrit :
+```http
+POST /attachments/upload
+{
+  "file": ecg.jpg,
+  "case_id": 1,
+  "display_name": "ECG 12 dérivations",
+  "show_at_start": true,
+  "trigger_keywords": ""   ← laisser vide
 }
 ```
 
