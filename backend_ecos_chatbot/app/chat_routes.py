@@ -247,27 +247,32 @@ async def chat(
     if not arbiter:
         raise HTTPException(500, "Erreur lors de l'arbitrage du message étudiant")
 
-    # 2. Si le message est refusé (allow_to_transcript == False), ne rien stocker et retourner un message system explicite
-    if not arbiter["safety"]["allow_to_transcript"]:
-        # Personnalisation du message selon la catégorie
-        cat = arbiter.get("category", "OTHER")
-        if cat == "ABUSIVE":
-            reason = "Votre message a été bloqué car il a été détecté comme inapproprié, insultant ou hors charte ECOS. Merci de rester respectueux dans vos échanges."
-        elif cat == "OFF_TOPIC":
-            reason = "Votre message a été jugé hors sujet pour cette station ECOS. Merci de rester dans le cadre de la simulation."
-        else:
-            reason = "Votre message n'a pas pu être accepté par le système. Si vous pensez que c'est une erreur, contactez l'administrateur."
-        # Si un texte masqué est proposé, l'afficher
-        redacted = arbiter["safety"].get("redacted_text")
-        if redacted:
-            reason += f"\nVersion modérée proposée : {redacted}"
-        return ChatOut(
-            patient_reply=reason,
-            attachments=None
+    # 2. Évaluer la décision de blocage — politique fail-open
+    # On ne bloque que sur du contenu clairement abusif (insultes) ou des tentatives
+    # d'exfiltration avérées (META + demande explicite de grille/prompt/scénario).
+    # En cas de doute (mauvaise classification, message médical borderline), on laisse passer.
+    cat = arbiter.get("category", "OTHER")
+    arbiter_blocks = not arbiter["safety"]["allow_to_transcript"]
+
+    # Blocage strict : seulement ABUSIVE ou META avec exfiltration réelle
+    is_hard_block = arbiter_blocks and cat in ("ABUSIVE",)
+    # META sans exfiltration avérée → on avertit mais on passe quand même
+    is_meta_exfiltration = arbiter_blocks and cat == "META"
+
+    if is_hard_block:
+        reason = "Votre message a été bloqué car il a été détecté comme insultant, menaçant ou hors charte ECOS. Merci de rester respectueux dans vos échanges."
+        return ChatOut(patient_reply=reason, attachments=None)
+
+    if is_meta_exfiltration:
+        # Signaler la tentative de triche sans bloquer l'examen
+        logger.warning(f"⚠️ Tentative META/exfiltration détectée: {payload.message[:80]}")
+        reason = (
+            "Le patient ne peut pas vous répondre à cette question. "
+            "Restez dans le cadre de la simulation clinique."
         )
+        return ChatOut(patient_reply=reason, attachments=None)
 
     # 3. Génération de la réponse patient selon la catégorie
-    cat = arbiter.get("category", "OTHER")
     # Optionnel : comportement spécial selon la catégorie
     if cat == "EXAM_REQUEST":
         # On peut logguer ou traiter différemment si besoin
