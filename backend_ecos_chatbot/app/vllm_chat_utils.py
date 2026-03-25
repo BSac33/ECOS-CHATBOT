@@ -486,28 +486,33 @@ Tu analyses la performance de l'étudiant et remplis la grille d'évaluation de 
 [GRILLE D'ÉVALUATION]
 {grid_json}
 
-RÈGLES CRITIQUES (ANTI-HALLUCINATION):
-- Tu dois te baser UNIQUEMENT sur le transcript fourni.
-- Tu n'attribues des points (points_awarded > 0) QUE si tu fournis au moins UNE citation EXACTE du transcript (copier-coller mot pour mot, entre guillemets).
-- Si tu ne peux pas citer exactement, alors points_awarded=0 et is_validated=false.
-- N'invente jamais de citations.
+━━━ ANTI-HALLUCINATION ━━━
+- Base-toi UNIQUEMENT sur le contenu du transcript fourni. N'invente rien.
+- Pour valider un item, tu dois pouvoir citer un passage du transcript qui prouve la présence
+  du critère (citation fidèle entre guillemets — reformulation proche acceptée, invention interdite).
+- Si le critère n'est clairement pas présent dans le transcript : points_awarded=0, is_validated=false.
+- Si tu as un doute sincère sur la présence du critère : ne valide pas.
 
-COUVERTURE OBLIGATOIRE:
-- Tu dois produire exactement un item de sortie pour CHAQUE item de la grille.
-- Ne fusionne pas les items. Ne supprime pas d'items.
+━━━ COUVERTURE OBLIGATOIRE ━━━
+- Produis exactement UN item de sortie pour CHAQUE item de la grille, dans le même ordre.
+- Ne fusionne jamais deux items. Ne supprime aucun item.
 - Conserve item_id, edn_code, criterion et points_possible exactement comme dans la grille.
 
-SCORING:
-- points_awarded est 0 ou points_possible (pas de demi-points), sauf si la grille indique explicitement qu'un item accepte des points partiels.
-- Si un item est composite (ex: "Traitements et allergies"), il n'est validé QUE si tous les éléments sont présents explicitement dans le transcript.
+━━━ SCORING ━━━
+- points_awarded = 0 ou points_possible uniquement (pas de demi-points).
+- Exception : si la grille indique explicitement "point partiel possible", alors points_awarded
+  peut être une valeur intermédiaire.
+- Item composite (ex: "A ET B") : valider SEULEMENT si A ET B sont tous deux présents.
+- Item alternatif (ex: "A OU B") : valider si au moins l'un est présent.
 
-STYLE DES JUSTIFICATIONS:
-- Si validé: commence par la/les citation(s) exacte(s) entre guillemets, puis une explication courte.
-- Si non validé: explique brièvement ce qui manque, sans inventer.
+━━━ JUSTIFICATIONS ━━━
+- Validé : citation entre guillemets (fidèle au transcript) + une phrase d'explication.
+- Non validé : ce qui manque, sans inventer.
 
-IMPORTANT (clinique réaliste):
-- Ne pénalise pas l'absence d'annonce de structure.
-- Pour la mise en confiance, compte toute empathie verbalisée explicite.
+━━━ CLINIQUE RÉALISTE ━━━
+- Ne pénalise pas l'absence d'annonce de structure d'interrogatoire.
+- Valorise toute empathie explicitement verbalisée ("je comprends", "ne vous inquiétez pas", etc.).
+- Sois bienveillant : si l'essentiel d'un critère est couvert, valide-le.
 """
     
     logger.info(f"📤 Envoi évaluation à vLLM avec structured output (modèle: {model})")
