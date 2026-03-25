@@ -380,11 +380,11 @@ def generate_patient_reply_vllm(
     model: Optional[str] = None,
 ) -> Dict[str, str] | None:
     """Génère une réponse patient via vLLM"""
-    
+
     if base_url is None:
         base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8001/v1")
     if model is None:
-        model = os.getenv("VLLM_MODEL", "mistralai/Ministral-8B-Instruct-2410")
+        model = os.getenv("VLLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
     
     client = OpenAI(
         base_url=base_url,
@@ -465,7 +465,7 @@ def generate_patient_reply_vllm_stream(
     if base_url is None:
         base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8001/v1")
     if model is None:
-        model = os.getenv("VLLM_MODEL", "mistralai/Ministral-8B-Instruct-2410")
+        model = os.getenv("VLLM_MODEL", "Qwen/Qwen2.5-7B-Instruct")
 
     client = OpenAI(base_url=base_url, api_key="dummy-key")
     system_instruction = build_patient_system_instruction(patient_prompt)
@@ -503,12 +503,20 @@ def evaluate_attempt_with_vllm(
     """
     Évalue une tentative via vLLM en analysant le transcript.
     Utilise la structured output avec Pydantic pour garantir le format JSON.
+
+    Variables d'environnement (par ordre de priorité) :
+      VLLM_EVAL_BASE_URL > VLLM_BASE_URL   (endpoint du modèle d'évaluation)
+      VLLM_EVAL_MODEL    > VLLM_MODEL       (nom du modèle d'évaluation)
+
+    Utiliser des variables séparées permet de dédier un Instruct plus grand à
+    l'évaluation (ex: Qwen2.5-14B-Instruct) pendant que le chat tourne sur un
+    modèle plus léger (ex: Qwen2.5-7B-Instruct), sans changer le chat.
     """
-    
+
     if base_url is None:
-        base_url = os.getenv("VLLM_BASE_URL", "http://localhost:8001/v1")
+        base_url = os.getenv("VLLM_EVAL_BASE_URL", os.getenv("VLLM_BASE_URL", "http://localhost:8001/v1"))
     if model is None:
-        model = os.getenv("VLLM_MODEL", "mistralai/Ministral-8B-Instruct-2410")
+        model = os.getenv("VLLM_EVAL_MODEL", os.getenv("VLLM_MODEL", "Qwen/Qwen2.5-7B-Instruct"))
     
     client = OpenAI(
         base_url=base_url,
