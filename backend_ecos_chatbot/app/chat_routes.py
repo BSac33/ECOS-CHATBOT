@@ -9,7 +9,7 @@ import os
 import json
 from models import ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, WrittenAnswerIn, StationType, User, Attachment, AttachmentOut
 from ai_chat_utils import generate_patient_reply
-from vllm_chat_utils import get_chat_completion_vllm, classify_student_message_vllm_arbiter, generate_patient_reply_vllm_stream, ArbiterOutput
+from vllm_chat_utils import get_chat_completion_vllm, classify_student_message_vllm_arbiter, generate_patient_reply_vllm_stream
 from attachment_routes import find_matching_attachments
 import logging
 import asyncio
@@ -244,33 +244,12 @@ async def chat(
     if not case.patient_prompt:
         raise HTTPException(500, "Station configurée sans patient_prompt")
     
-    # 1 + 3. Arbitre ET réponse patient en PARALLÈLE (asyncio.to_thread)
-    # L'arbitre (modèle léger, ~1s) et la génération patient (modèle principal, ~3-5s)
-    # tournent simultanément. Si l'arbitre bloque le message, la réponse patient est
-    # simplement ignorée. Politique fail-open : tout erreur de l'arbitre → on laisse passer.
-    _ARBITER_FALLBACK = {
-        "category": "OTHER", "tone": "NEUTRAL",
-        "exam": {"requested": False, "label": None, "confidence": None},
-        "safety": {"allow_to_transcript": True, "redact": False, "redacted_text": None}
-    }
+    # 1. Arbitre déterministe (instantané, pas de LLM)
+    arbiter = classify_student_message_vllm_arbiter(case.attachments, payload.message)
+
     _REPLY_FALLBACK = "Je n'ai pas bien entendu, pouvez-vous répéter ?"
 
-    logger.info("⚡ Lancement parallèle : arbitre + génération patient")
-    results = await asyncio.gather(
-        asyncio.to_thread(classify_student_message_vllm_arbiter, case.attachments, payload.message),
-        asyncio.to_thread(generate_patient_reply, case.patient_prompt, history, payload.message),
-        return_exceptions=True
-    )
-
-    arbiter = results[0] if not isinstance(results[0], Exception) else _ARBITER_FALLBACK
-    reply   = results[1] if not isinstance(results[1], Exception) else _REPLY_FALLBACK
-
-    if isinstance(results[0], Exception):
-        logger.warning(f"⚠️ Arbitre en erreur, fail-open: {results[0]}")
-    if isinstance(results[1], Exception):
-        logger.error(f"❌ Génération patient en erreur: {results[1]}")
-
-    # 2. Évaluer la décision de blocage — politique fail-open
+    # 2. Évaluer la décision de blocage
     cat = arbiter.get("category", "OTHER")
     arbiter_blocks = not arbiter["safety"]["allow_to_transcript"]
     is_hard_block      = arbiter_blocks and cat == "ABUSIVE"
@@ -291,6 +270,13 @@ async def chat(
 
     if cat == "EXAM_REQUEST":
         logger.info("Demande d'examen complémentaire : %s", arbiter["exam"])
+
+    # 3. Génération patient (LLM)
+    try:
+        reply = await asyncio.to_thread(generate_patient_reply, case.patient_prompt, history, payload.message)
+    except Exception as e:
+        logger.error(f"❌ Génération patient en erreur: {e}")
+        reply = _REPLY_FALLBACK
 
     logger.info(f"✅ Réponse patient ({len(reply)} car.) | catégorie={cat}")
 
@@ -374,24 +360,9 @@ async def chat_stream(
     case_attachments = list(case.attachments)
     message_text = payload.message
 
-    _ARBITER_FALLBACK = {
-        "category": "OTHER", "tone": "NEUTRAL",
-        "exam": {"requested": False, "label": None, "confidence": None},
-        "safety": {"allow_to_transcript": True, "redact": False, "redacted_text": None}
-    }
-
     async def event_stream():
-        # 1. Arbitre en parallèle avec première partie du streaming
-        arbiter_task = asyncio.create_task(
-            asyncio.to_thread(classify_student_message_vllm_arbiter, case_attachments, message_text)
-        )
-
-        # 2. Attendre l'arbitre (rapide ~1-2s) avant de streamer
-        try:
-            arbiter = await arbiter_task
-        except Exception as e:
-            logger.warning(f"⚠️ Arbitre en erreur, fail-open: {e}")
-            arbiter = _ARBITER_FALLBACK
+        # 1. Arbitre déterministe (instantané)
+        arbiter = classify_student_message_vllm_arbiter(case_attachments, message_text)
 
         cat = arbiter.get("category", "OTHER")
         arbiter_blocks = not arbiter["safety"]["allow_to_transcript"]
