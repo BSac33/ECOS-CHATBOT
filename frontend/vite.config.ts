@@ -37,6 +37,11 @@ export default defineConfig({
         target: 'http://fastapi:8000',
         changeOrigin: true,
       },
+      // Atelier de création de stations (enseignants)
+      '/authoring': {
+        target: 'http://fastapi:8000',
+        changeOrigin: true,
+      },
       // Rediriger les requêtes /admin vers le backend
       '/admin': {
         target: 'http://fastapi:8000',

@@ -8,6 +8,9 @@ export const routes = [
     {'path': '/login', 'name': 'login', 'component': LoginForm},
     {'path': '/chat/:attemptId', 'name': 'chat', 'component': ChatView, props: true, meta: { requiresAuth: true }},
     {'path': '/debrief/:attemptId', 'name': 'debrief', 'component': Debrief, props: true, meta: { requiresAuth: true }},
+    // Atelier de création de stations (enseignants)
+    {'path': '/atelier', 'name': 'authoring', component: () => import('./authoring/AuthoringCases.vue'), meta: { requiresAuth: true, requiresTeacher: true }},
+    {'path': '/atelier/:caseId', 'name': 'case-editor', component: () => import('./authoring/CaseEditor.vue'), props: true, meta: { requiresAuth: true, requiresTeacher: true }},
     // Route temporaire pour l'évaluation (à implémenter)
     {'path': '/evaluation/:attemptId', 'name': 'evaluation', component: () => import('./components/EvaluationPlaceholder.vue'), props: true, meta: { requiresAuth: true }},
 ]

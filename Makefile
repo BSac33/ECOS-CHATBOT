@@ -1,10 +1,11 @@
-.PHONY: help setup reset seed db-shell logs stop clean test
+.PHONY: help setup reset seed corpus db-shell logs stop clean test
 
 help:
 	@echo "🎓 ECOS CHATBOT - Commandes disponibles"
 	@echo ""
 	@echo "  make setup    - Démarre tous les services (DB + API + migration)"
 	@echo "  make seed     - Remplit la base avec des cas d'exemple (⚠️  services doivent être lancés)"
+	@echo "  make corpus   - Importe le référentiel officiel de cardiologie (CNEC/SFC) pour l'atelier"
 	@echo "  make reset    - Arrête tout, supprime la DB et redémarre avec seed"
 	@echo "  make db-shell - Ouvre un shell PostgreSQL interactif"
 	@echo "  make logs     - Affiche les logs en temps réel"
@@ -32,6 +33,11 @@ seed:
 	@echo "🎯 Pour tester :"
 	@echo "   python ecos_cli.py case-list"
 	@echo "   python ecos_cli.py chat-loop 1"
+
+corpus:
+	@echo "📚 Import du référentiel de cardiologie (CNEC/SFC, accord du collège et d'UNESS)..."
+	cd backend_ecos_chatbot && docker-compose exec fastapi python scripts/ingest_corpus.py
+	@echo "✅ Référentiel importé (relancer après un seed n'est pas nécessaire : il est conservé)"
 
 reset:
 	@echo "🔄 Reset complet de l'environnement..."

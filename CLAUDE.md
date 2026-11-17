@@ -23,6 +23,9 @@ make seed
 
 # Or reset everything from scratch
 make reset
+
+# Import the official cardiology reference (CNEC/SFC) used by the case authoring assistant
+make corpus
 ```
 
 ### Backend
@@ -99,6 +102,14 @@ alembic downgrade -1
 - `admin_routes.py` - Case and evaluation grid management (admin only)
 - `attachment_routes.py` - File upload/download for case resources
 - `evaluation_routes.py` - Post-exam evaluation with LLM
+- `authoring_routes.py` - Case authoring workshop for teachers (`/authoring`): drafts, compiled preview, checks, versioned publish, teacher test attempts, assistant, reference search. See `docs/CASE_AUTHORING.md`
+
+**Case Authoring:**
+- `case_sheet.py` - Structured case sheet (facts, not prompts: patient words, spontaneous vs on-question disclosure, pertinent negatives, never-says terms, grid linked to facts) compiled into patient prompt / evaluator context / grid / exam findings; `check_sheet` role-maintenance checks (erreur blocks publication)
+- `case_publishing.py` - `publish()` freezes a `CaseVersion` and updates the case runtime fields, grid and EDN links; `snapshot(..., "test")` for teacher test attempts
+- `authoring_assistant.py` - "Générer" actions (interview, negatives, lay wording, persona, grid, exam) grounded on the official corpus, structured output, deterministic filtering; proposals marked `generated=True` until the teacher validates them. Any OpenAI-compatible server (`AUTHORING_*`, defaults to `VLLM_*`)
+- `corpus.py` - Official 2nd-cycle reference: SFC/CNEC chapter parser (R2C item, starting situations, ranked objectives, ranked excerpts), idempotent `store_chapter`, BM25 `search_corpus`. Import: `scripts/ingest_corpus.py`. Texts live in the DB only, never in the repo (agreement of the cardiology college and UNESS; tests use a fictitious chapter)
+- `case_examples.py` - Dupont case as a structured sheet (used by the seed and tests)
 
 **AI Utilities:**
 - `ai_chat_utils.py` - Gemini API integration for patient simulation
@@ -121,6 +132,7 @@ alembic downgrade -1
 - `ChatView.vue` - Interactive patient interview interface (text via SSE, push-to-talk, hands-free oral consultation)
 - `components/VoiceConsultation.vue` - Oral consultation screen: no text by default (transcript still persisted), patient status, mic level, examiner notes
 - `Debrief.vue` - Post-evaluation results display
+- `authoring/` - Case authoring workshop (`/atelier`, teachers/admins): `AuthoringCases.vue`, `CaseEditor.vue` (tabs, autosave, checks, test, publish), `FactsEditor.vue`, `GridEditor.vue`, `AssistantPanel.vue`, `CorpusSearch.vue`, `api.ts`
 
 **Components:**
 - `ChatHeader.vue` - Case info + countdown timer
@@ -151,8 +163,11 @@ Defined in `models.py` as `StationType` enum:
 ```
 POST /chat/attempts
 Body: {"case_id": 1}
-→ Creates Attempts record with UUID
-→ Sets expires_at based on case.duration_seconds
+→ Creates Attempts record with UUID, bound to the latest published CaseVersion
+  (attempts.case_version_id): chat, voice and evaluation use that frozen version
+→ Sets expires_at based on the version duration
+→ Students cannot start a draft; teachers test drafts via POST /authoring/cases/{id}/test
+  (attempts.is_test, excluded from user stats)
 ```
 
 **2. Chat (for patient_interview stations only)**
@@ -235,6 +250,11 @@ GEMINI_MODEL=gemini-1.5-flash
 VLLM_BASE_URL=http://localhost:8001/v1
 VLLM_MODEL=meta-llama/Llama-3.1-8B-Instruct
 VLLM_API_KEY=token-abc123
+
+# Case authoring assistant (empty = VLLM_* above)
+AUTHORING_BASE_URL=
+AUTHORING_MODEL=
+AUTHORING_API_KEY=
 ```
 
 ### Frontend (`frontend/.env.local`)
@@ -284,6 +304,12 @@ make test
 
 ## Common Tasks
 
+### Create a Clinical Case
+Use the workshop (`/atelier`, teacher role): fill the structured sheet, follow the checks, use
+"Générer", test the patient, publish. Do not hand-write patient prompts: they are compiled from
+the sheet (`case_sheet.compile_case`). In code/seed: build a `CaseSheet` and call
+`case_publishing.publish()` (see `seed_database.py`).
+
 ### Add a New Station Type
 1. Add enum value to `StationType` in `models.py`
 2. Update station type validation in `chat_routes.py`
@@ -313,6 +339,7 @@ Set `LLM_PROVIDER=vllm` in `fastapi.env` and configure vLLM endpoint. The code a
 - `docs/STRUCTURED_OUTPUT.md` - Pydantic structured output implementation
 - `docs/STATION_TYPES.md` - Station type definitions
 - `docs/PATIENT_AGENT.md` - Patient agent tool calling, guardrails, moderation events
+- `docs/CASE_AUTHORING.md` - Case authoring workshop: structured sheet, compilation, checks, versions, assistant, official corpus (sources and rights), API
 - `docs/VOICE.md` - Voice mode: architecture, WebSocket protocol, Kyutai servers (`voice/docker-compose.yml`), voices
 - `docs/ATTACHMENTS.md` - File attachment system
 - `docs/USER_ROUTES.md` - User API documentation
@@ -324,14 +351,17 @@ Set `LLM_PROVIDER=vllm` in `fastapi.env` and configure vLLM endpoint. The code a
 
 **Core Tables:**
 - `users` - Student/teacher/admin accounts
-- `clinical_cases` - ECOS station definitions
-- `attempts` - Student attempt sessions
+- `clinical_cases` - ECOS station definitions (`sheet`: structured case sheet being edited; runtime fields = latest published version)
+- `case_versions` - Frozen compiled versions (`published` | `test`); `attempts.case_version_id` = version played
+- `attempts` - Student attempt sessions (`case_version_id`: version played; `is_test`: teacher test, excluded from stats)
 - `chat_messages` - Conversation transcripts (roles: system, student, patient, examiner; `modality` text|voice; `interrupted_by` + `spoken_content` when the student cut the patient off)
 - `moderation_events` - Student misconduct (blocked by arbiter or flagged by patient agent)
 - `evaluation_grids` - Assessment criteria (JSON column)
 - `evaluation_results` - Cached evaluation summaries
 - `evaluation_item_results` - Individual item scores for analytics
 - `attachments` - Case resources (images, PDFs, etc.)
+- `corpus_sources` / `corpus_chunks` - Official reference (source + rights note; ranked excerpts per R2C item and section)
+- `starting_situations` / `item_situation_links` - ECOS starting situations and their R2C items (from the corpus)
 
 **Link Tables** (Many-to-Many):
 - `case_edn_link` - Cases ↔ EDN items

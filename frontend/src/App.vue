@@ -2,10 +2,14 @@
 import { RouterLink, RouterView } from 'vue-router';
 import { Drawer } from 'primevue';
 import Button from 'primevue/button';
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
+import { useAuthStore } from './stores/auth';
+import { isTeacher } from './authoring/api';
 import 'primeicons/primeicons.css';
 
 const visible = ref(false);
+const auth = useAuthStore();
+const canAuthor = computed(() => isTeacher(auth.user));
 </script>
 
 <template>
@@ -14,6 +18,7 @@ const visible = ref(false);
     <div class="floating-menu-button" :class="{ 'menu-open': visible }">
       <Drawer v-model:visible="visible" header="Menu principal">
         <p><RouterLink @click="visible = false" to="/">Dashboard</RouterLink></p>
+        <p v-if="canAuthor"><RouterLink @click="visible = false" to="/atelier">Atelier de stations</RouterLink></p>
         <p><RouterLink @click="visible = false" to="/login">Login</RouterLink></p>
       </Drawer>
 
@@ -57,5 +62,13 @@ const visible = ref(false);
   padding-left: 5rem;
   padding-right: 5rem;
   overflow: hidden;
+}
+
+/* Téléphone : marges réduites (le bouton de menu reste dégagé à gauche) */
+@media (max-width: 640px) {
+  .main-view {
+    padding-left: 4.25rem;
+    padding-right: 0.75rem;
+  }
 }
 </style>
