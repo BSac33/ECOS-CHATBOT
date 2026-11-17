@@ -126,6 +126,27 @@ def create_case_douleur_thoracique(session: Session, disciplines: list, edn_item
     return case
 
 
+def import_private_packs(session: Session) -> int:
+    """Importe les packs de private/stations/ et ceux de STATION_PACKS (chemins séparés par « : »)."""
+    from pathlib import Path
+    from station_packs import find_packs, import_pack
+
+    paths = find_packs() + [Path(p) for p in os.getenv("STATION_PACKS", "").split(":") if p.strip()]
+    if not paths:
+        return 0
+    author = session.exec(select(User).where(User.username == "bensac")).first() \
+        or session.exec(select(User).where(User.role == UserRole.admin)).first()
+    total = 0
+    for path in paths:
+        print(f"\n📦 Import du pack {path.name}...")
+        report = import_pack(session, path, author)
+        print(f"✅ {report.summary()}")
+        for line in report.messages:
+            print(f"   ⚠️  {line}")
+        total += len(report.created) + len(report.updated) + len(report.unchanged)
+    return total
+
+
 def main():
     """Fonction principale de seed"""
     print("🌱 Démarrage du seed de la base de données ECOS...\n")
@@ -143,6 +164,9 @@ def main():
         print("\n🏥 Création des cas cliniques d'interrogatoire...\n")
         
         case1 = create_case_douleur_thoracique(session, disciplines, edn_items)
+
+        # Packs privés de stations (livre, banque de la faculté) : hors dépôt
+        imported = import_private_packs(session)
         
         print("\n" + "="*60)
         print("✅ SEED TERMINÉ AVEC SUCCÈS!")
@@ -150,7 +174,7 @@ def main():
         print(f"\n📊 Résumé:")
         print(f" - Disciplines créées : {len(disciplines)}")
         print(f" - Items EDN créés : {len(edn_items)}")
-        print(f" - Cas cliniques créés : 1")
+        print(f" - Cas cliniques créés : 1 (+ {imported} station(s) de packs privés)")
         print("\n💡 Pour tester le cas créé, utilisez les commandes CLI suivantes :")
         print(f"   python ecos_cli.py chat-loop {case1.id}")
         print()

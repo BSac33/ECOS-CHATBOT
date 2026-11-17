@@ -12,12 +12,19 @@ Aucune vérification ici : l'appelant a déjà refusé les fiches avec des erreu
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from sqlmodel import Session, select
 
 from case_sheet import CaseSheet, compile_case
 from models import CaseEdnLink, CaseVersion, ClinicalCase, EDNItem, EvaluationGrid, StationType
+
+
+def runtime(version: Optional[CaseVersion]) -> Optional[dict]:
+    """Champs compilés d'une version (interlocuteur, échelles, documents...), depuis sa fiche figée."""
+    if version is None or not version.sheet:
+        return None
+    return compile_case(CaseSheet.model_validate(version.sheet))
 
 
 def versions(session: Session, case_id: int) -> List[CaseVersion]:
@@ -31,7 +38,7 @@ def snapshot(session: Session, case: ClinicalCase, sheet: CaseSheet, status: str
     version = CaseVersion(
         case_id=case.id, version=number, status=status, sheet=sheet.model_dump(mode="json"),
         title=compiled["title"] or case.title, student_instructions=compiled["student_instructions"],
-        scenario_context=compiled["scenario_context"], patient_prompt=compiled["patient_prompt"],
+        scenario_context=compiled["scenario_context"], patient_prompt=compiled["patient_prompt"] or "",
         duration_seconds=compiled["duration_seconds"], exam_findings=compiled["exam_findings"],
         grid_items=compiled["grid_items"], total_points=compiled["total_points"],
         voice_id=compiled["voice_id"], created_by=user_id,

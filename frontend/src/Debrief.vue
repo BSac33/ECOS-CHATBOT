@@ -10,12 +10,24 @@
 
       <!-- Note globale -->
       <div class="global-score">
-        <div class="score-value">
+        <div v-if="evaluation.score_20 != null" class="score-value">
+          <span class="points-obtained">{{ fmt(evaluation.score_20) }}</span>
+          <span class="separator">/</span>
+          <span class="points-possible">20</span>
+        </div>
+        <div v-else class="score-value">
           <span class="points-obtained">{{ evaluation.total_score }}</span>
           <span class="separator">/</span>
           <span class="points-possible">{{ evaluation.points_possible }}</span>
         </div>
-        <div class="score-percentage">
+        <div v-if="evaluation.score_20 != null" class="score-detail">
+          Grille : {{ fmt(evaluation.total_score) }} / {{ fmt(evaluation.points_possible) }} items observés
+          <template v-if="ratedScales.length">
+            · Attitudes : {{ fmt(scalesMean) }} / 4 en moyenne
+            ({{ Math.round((evaluation.attitude_weight ?? 0) * 100) }} % de la note)
+          </template>
+        </div>
+        <div v-else class="score-percentage">
           {{ scorePercentage }}%
         </div>
       </div>
@@ -29,6 +41,34 @@
             :key="item.edn_code || item.item_name"
             :item="item"
           />
+        </div>
+
+        <!-- Échelles d'attitude et performance globale (format des ECOS nationaux) -->
+        <div v-if="evaluation.scales.length || evaluation.global_performance" class="scales">
+          <h2>Communication et attitudes</h2>
+          <div v-for="sc in evaluation.scales" :key="sc.scale_id" class="scale" :class="{ unrated: sc.level == null }">
+            <div class="scale-head">
+              <span class="scale-label">{{ sc.label }}</span>
+              <span v-if="sc.level != null" class="scale-level" :class="`level-${sc.level}`">
+                {{ sc.level }}/4 · {{ sc.level_name }}
+              </span>
+              <span v-else class="scale-level none">{{ sc.observable ? 'non évaluée' : 'non évaluable ici' }}</span>
+            </div>
+            <p v-if="sc.justification" class="scale-why">{{ sc.justification }}</p>
+          </div>
+          <div v-if="evaluation.global_performance" class="scale global">
+            <div class="scale-head">
+              <span class="scale-label">{{ evaluation.global_performance.label }}</span>
+              <span v-if="evaluation.global_performance.level != null" class="scale-level"
+                    :class="`level-${evaluation.global_performance.level}`">
+                {{ evaluation.global_performance.level }}/4 · {{ evaluation.global_performance.level_name }}
+              </span>
+            </div>
+            <p v-if="evaluation.global_performance.justification" class="scale-why">
+              {{ evaluation.global_performance.justification }}
+            </p>
+            <p class="scale-note">Indicative : elle n'entre pas dans la note.</p>
+          </div>
         </div>
 
         <!-- Commentaire global -->
@@ -60,6 +100,32 @@
               </li>
             </ul>
           </template>
+        </div>
+
+        <!-- Contenu pédagogique de la station (après la correction) -->
+        <div v-if="hasTeaching" class="teaching">
+          <h2>Pour aller plus loin</h2>
+          <p v-if="teaching!.source" class="teaching-source">{{ teaching!.source }}</p>
+          <template v-if="teaching!.objectives.length">
+            <h3>Objectifs pédagogiques</h3>
+            <ol><li v-for="(o, i) in teaching!.objectives" :key="i">{{ o }}</li></ol>
+          </template>
+          <template v-if="teaching!.key_points.length">
+            <h3>Éléments clés de l'évaluation</h3>
+            <dl class="key-points">
+              <template v-for="(k, i) in teaching!.key_points" :key="i">
+                <dt>{{ k.label }}</dt><dd>{{ k.text }}</dd>
+              </template>
+            </dl>
+          </template>
+          <details v-if="teaching!.model_script">
+            <summary>Proposition de script</summary>
+            <div class="long-text"><p v-for="(para, i) in paragraphs(teaching!.model_script)" :key="i">{{ para }}</p></div>
+          </details>
+          <details v-if="teaching!.comments" open>
+            <summary>Commentaires</summary>
+            <div class="long-text"><p v-for="(para, i) in paragraphs(teaching!.comments)" :key="i">{{ para }}</p></div>
+          </details>
         </div>
 
         <!-- Pour approfondir -->
@@ -98,12 +164,41 @@ interface EvaluationItemRaw {
   justification: string;
 }
 
+interface ScaleRating {
+  scale_id: string;
+  label: string;
+  observable: boolean;
+  level: number | null;
+  level_name: string | null;
+  justification: string | null;
+}
+
+interface GlobalPerformance {
+  label: string;
+  level: number | null;
+  level_name: string | null;
+  justification: string | null;
+}
+
 interface EvaluationRaw {
   items: EvaluationItemRaw[];
   total_score: number;
   total_possible: number;
   percentage: number;
   general_feedback: string;
+  scales?: ScaleRating[];
+  global_performance?: GlobalPerformance | null;
+  attitude_weight?: number | null;
+  score_20?: number | null;
+}
+
+interface Teaching {
+  title: string | null;
+  source: string | null;
+  objectives: string[];
+  key_points: { label: string; text: string }[];
+  model_script: string;
+  comments: string;
 }
 
 interface EvaluationResponse {
@@ -124,6 +219,10 @@ interface EvaluationData {
   points_possible: number;
   overall_feedback: string;
   items: EvaluationItemData[];
+  scales: ScaleRating[];
+  global_performance: GlobalPerformance | null;
+  attitude_weight: number | null;
+  score_20: number | null;
 }
 
 interface CaseInfo {
@@ -162,6 +261,21 @@ const evaluation = ref<EvaluationData | null>(null);
 const caseInfo = ref<CaseInfo | null>(null);
 const oralConsultation = ref(false);
 const interruptions = ref<Interruption[]>([]);
+const teaching = ref<Teaching | null>(null);
+
+const hasTeaching = computed(() => !!teaching.value && (teaching.value.objectives.length > 0
+  || teaching.value.key_points.length > 0 || !!teaching.value.model_script || !!teaching.value.comments));
+const ratedScales = computed(() => (evaluation.value?.scales ?? []).filter(s => s.level != null));
+const scalesMean = computed(() => ratedScales.value.length
+  ? ratedScales.value.reduce((sum, s) => sum + (s.level ?? 0), 0) / ratedScales.value.length : 0);
+
+function paragraphs(text: string): string[] {
+  return text.split(/\n+/).map(p => p.trim()).filter(Boolean);
+}
+
+function fmt(value: number): string {
+  return (Math.round(value * 100) / 100).toLocaleString('fr-FR');
+}
 
 const scorePercentage = computed(() => {
   if (!evaluation.value) return 0;
@@ -200,7 +314,11 @@ onMounted(async () => {
           points_obtained: item.points_awarded,
           points_possible: item.points_possible,
           justification: item.justification
-        }))
+        })),
+        scales: evalData.scales ?? [],
+        global_performance: evalData.global_performance ?? null,
+        attitude_weight: evalData.attitude_weight ?? null,
+        score_20: evalData.score_20 ?? null,
       };
     }
     
@@ -214,6 +332,13 @@ onMounted(async () => {
       .some((m: { modality?: string }) => m.modality === 'voice');
     interruptions.value = transcriptResponse.interruptions ?? [];
     
+    // Contenu pédagogique de la station (facultatif)
+    try {
+      teaching.value = await apiService.getAttemptTeaching(attemptId.value);
+    } catch {
+      teaching.value = null;
+    }
+
     // 3. Récupérer les infos du case
     const caseData = await apiService.getClinicalCase(caseId);
     console.log('=== DONNÉES CASE ===');
@@ -338,6 +463,113 @@ onMounted(async () => {
 }
 
 /* Commentaire global */
+.score-detail {
+  margin-top: .5rem;
+  font-size: .95rem;
+  color: rgba(255, 255, 255, .9);
+}
+
+.scales, .teaching {
+  background: white;
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+}
+
+.scales h2, .teaching h2 {
+  margin: 0 0 1rem;
+  font-size: 1.3rem;
+  color: #1e293b;
+}
+
+.scale {
+  border-top: 1px solid #e2e8f0;
+  padding: .75rem 0;
+}
+
+.scale-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  flex-wrap: wrap;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.scale-level {
+  border-radius: 999px;
+  padding: .1rem .7rem;
+  font-size: .85rem;
+  white-space: nowrap;
+}
+
+.scale-level.level-0 { background: #fee2e2; color: #991b1b; }
+.scale-level.level-1 { background: #fef3c7; color: #92400e; }
+.scale-level.level-2 { background: #e0f2fe; color: #075985; }
+.scale-level.level-3 { background: #dcfce7; color: #166534; }
+.scale-level.level-4 { background: #bbf7d0; color: #14532d; }
+.scale-level.none { background: #f1f5f9; color: #64748b; font-weight: 400; }
+
+.scale-why {
+  margin: .35rem 0 0;
+  color: #475569;
+  font-size: .92rem;
+}
+
+.scale-note {
+  margin: .25rem 0 0;
+  color: #94a3b8;
+  font-size: .85rem;
+}
+
+.teaching h3 {
+  font-size: 1.05rem;
+  margin: 1.25rem 0 .5rem;
+  color: #334155;
+}
+
+.teaching-source {
+  color: #64748b;
+  font-size: .9rem;
+  margin: -.5rem 0 0;
+}
+
+.key-points {
+  display: grid;
+  grid-template-columns: minmax(8rem, 14rem) 1fr;
+  gap: .4rem 1rem;
+  margin: 0;
+}
+
+.key-points dt { font-weight: 600; color: #334155; }
+.key-points dd { margin: 0; color: #475569; }
+
+.teaching details {
+  margin-top: 1rem;
+}
+
+.teaching summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #334155;
+}
+
+.long-text {
+  color: #334155;
+  line-height: 1.55;
+  margin-top: .5rem;
+}
+
+.long-text p {
+  margin: 0 0 .6rem;
+}
+
+@media (max-width: 640px) {
+  .key-points { grid-template-columns: 1fr; }
+  .key-points dd { margin-bottom: .5rem; }
+}
+
 .global-feedback {
   background: white;
   padding: 2rem;

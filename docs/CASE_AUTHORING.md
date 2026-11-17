@@ -41,6 +41,49 @@ Statut porté par la station (`clinical_cases.review_status`), indépendant de l
 - **La publication n'est jamais bloquée** : une station à relire, relue ou jamais relue se publie
   de la même façon. Le statut n'est pas montré aux étudiants.
 
+## Formats de station (ECOS nationaux)
+
+| Champ | Valeurs |
+|---|---|
+| `station.domain` | les 11 domaines : entretien/interrogatoire, examen clinique, synthèse paraclinique, stratégie diagnostique, stratégie de prise en charge, éducation/prévention, annonce/information, urgence vitale, communication interprofessionnelle, iconographie, procédure |
+| `station.interlocutor` | `patient` (patient ou proche standardisé, joué par le modèle) ou `aucun` (station sans PS ni PSS : l'étudiant parle seul devant les examinateurs) |
+| `station.documents` | documents de la vignette (ECG, imagerie...) : pièces jointes montrées dans la conversation dès le début de la station |
+
+**Station sans interlocuteur** : rien ne répond (ni patient, ni arbitre, ni voix). Chaque prise de
+parole de l'étudiant (texte, micro ou consultation mains libres) est enregistrée ; une consigne
+« exposez votre raisonnement à voix haute » est ajoutée à la vignette. Le transcript d'évaluation
+commence par `[STATION SANS INTERLOCUTEUR]` : un item « explique au patient » est validé si
+l'étudiant l'explique aux examinateurs.
+
+**Procédure, examen clinique, urgence vitale avec patient** : la vignette rappelle de décrire à
+voix haute chaque geste (seul ce qui est dit est évalué).
+
+Le domaine adapte les vérifications : le lien item ↔ fait n'est exigé que pour l'interrogatoire,
+le motif de consultation n'est obligatoire que pour l'interrogatoire, une station sans interlocuteur
+n'a ni personnage ni faits.
+
+### Échelles d'attitude et note /20
+
+Comme aux ECOS nationaux, la grille a deux parties :
+
+- **items** observés / non observés (aptitudes cliniques) ;
+- **échelles d'attitude** cotées de 0 (inacceptable) à 4 (remarquable) : écoute, renseignements au
+  patient, structuration de l'entrevue, questionnement, procédure, planification des soins,
+  proposition de prise en charge, synthèse des données, communication non verbale... Chaque
+  échelle peut porter ses 5 descripteurs (sinon descripteurs génériques). La communication non
+  verbale (regard, posture) est affichée mais **non notée** sur la plateforme ;
+- **évaluation globale de la performance** (0 à 4) : indicative, hors note.
+
+`scoring.py` recalcule tout (jamais les sommes du LLM) :
+note /20 = 20 × ((1 − p) × items obtenus / items possibles + p × moyenne des échelles / 4),
+avec p = `correction.attitude_weight` (25 % par défaut, 20 à 30 % aux ECOS-N).
+
+### Contenu pédagogique
+
+`correction.teaching` : objectifs pédagogiques, éléments clés de l'évaluation, proposition de
+script, commentaires. Affiché au débriefing (*Pour aller plus loin*), uniquement après la fin de
+la station (`GET /evaluation/attempts/{id}/teaching`).
+
 ## La fiche de cas (`case_sheet.py`)
 
 | Partie | Contenu |
@@ -170,6 +213,7 @@ Ajouter une autre spécialité : écrire son analyseur (même sortie `ParsedChap
 | POST | `/cases` | nouveau brouillon `{title}` |
 | GET | `/cases/{id}` | fiche, aperçu compilé, vérifications, versions |
 | PUT | `/cases/{id}/sheet` | enregistrer la fiche (renvoie vérifications et aperçu) |
+| POST | `/cases/{id}/documents` | fichier d'un document de vignette (image ou PDF, 15 Mo) → `attachment_id` |
 | POST | `/cases/{id}/publish` | publier ; 422 avec `{message, issues}` s'il reste des erreurs ; 409 si le titre est pris |
 | POST | `/cases/{id}/test` | tentative de test du brouillon → `{attempt_id, version_id}` (auteur ou relecteur) |
 | POST | `/cases/{id}/review/request` | demander une relecture (auteur) |
@@ -190,9 +234,31 @@ Un enseignant modifie ses stations et lit celles de ses collègues qui demandent
 test, publication), `FactsEditor.vue`, `GridEditor.vue`, `AssistantPanel.vue`, `CorpusSearch.vue`,
 `api.ts` (types de la fiche et appels).
 
+## Packs privés de stations (`station_packs.py`)
+
+Pour les contenus protégés (livre, banque d'une faculté) : **jamais dans le dépôt** (public).
+
+```
+<pack>/pack.json             {"id", "title", "license_note", "stations": ["stations/ecos01.json", ...]}
+<pack>/stations/ecos01.json  {"key", "sheet": <fiche>, "files": {"<id document>": "images/x.png"}, "review": "a_relire"}
+<pack>/images/...            documents des vignettes
+```
+
+- Emplacement : `backend_ecos_chatbot/app/private/stations/` (dossier ignoré par git, visible dans
+  le conteneur), dossier ou archive `.zip` ; ou variable `STATION_PACKS` (chemins séparés par `:`).
+- `make seed` importe tous les packs trouvés après les cas d'exemple ; `make stations` (ou
+  `python scripts/import_stations.py [pack]`) les importe sans réinitialiser la base.
+- Import idempotent : station retrouvée par `clinical_cases.source_key` (`<pack>/<clé>`) ; fiche
+  modifiée → nouvelle version publiée ; fiche identique → rien. Les modifications faites dans
+  l'atelier sur une station importée sont écrasées au réimport suivant du pack (le pack fait foi).
+- Une station avec des erreurs bloquantes ou un titre déjà pris reste en brouillon (signalé).
+- `"review": "a_relire"` met la station « à relire » à sa première importation.
+
 ## Limites connues
 
 - Les consignes de l'assistant n'ont été vérifiées qu'avec un faux serveur LLM : à valider sur le
   modèle réel (qualité des propositions, respect du schéma JSON).
 - Les cas créés avant l'atelier n'ont pas de fiche ; pas de conversion automatique.
 - Seule la cardiologie est importée.
+- Les échelles sont cotées d'après le transcript : l'aisance gestuelle d'une procédure n'est
+  évaluée que sur ce que l'étudiant décrit.

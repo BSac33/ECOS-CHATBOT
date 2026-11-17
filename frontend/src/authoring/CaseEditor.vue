@@ -20,8 +20,13 @@ import GridEditor from './GridEditor.vue'
 import StringList from './StringList.vue'
 import AssistantPanel from './AssistantPanel.vue'
 import CorpusSearch from './CorpusSearch.vue'
+import DocumentsEditor from './DocumentsEditor.vue'
+import ScalesEditor from './ScalesEditor.vue'
+import TeachingEditor from './TeachingEditor.vue'
+import SelectButton from 'primevue/selectbutton'
 import {
-  ApiError, authoringApi, type CaseDetail, type CaseSheet, type Issue, type ReferenceItem, type ReferenceSituation,
+  ApiError, authoringApi, DOMAIN_LABELS, type CaseDetail, type CaseSheet, type Issue, type ReferenceItem,
+  type ReferenceSituation,
 } from './api'
 
 const props = defineProps<{ caseId: string }>()
@@ -112,6 +117,12 @@ const voiceOptions = computed(() => {
   const current = sheet.value?.station.voice_id
   return current && !VOICES.some((v) => v.value === current) ? [...VOICES, { value: current, label: current }] : VOICES
 })
+const DOMAINS = Object.entries(DOMAIN_LABELS).map(([value, label]) => ({ value, label }))
+const INTERLOCUTORS = [
+  { value: 'patient', label: 'Patient standardisé' },
+  { value: 'aucun', label: 'Aucun (face aux examinateurs)' },
+]
+const noPatient = computed(() => sheet.value?.station.interlocutor === 'aucun')
 const SEX = [{ value: 'femme', label: 'Femme' }, { value: 'homme', label: 'Homme' }, { value: 'autre', label: 'Autre' }]
 const REGISTERS = [
   { value: 'courant', label: 'Courant' }, { value: 'simple', label: 'Simple' },
@@ -134,6 +145,7 @@ const LEVEL = {
 function tabFor(field: string) {
   if (field.startsWith('station')) return 'station'
   if (field.startsWith('patient')) return 'patient'
+  if (field.startsWith('correction.teaching')) return 'pedagogie'
   if (field.startsWith('correction')) return 'correction'
   return 'faits'
 }
@@ -263,7 +275,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="top-actions" v-if="sheet">
-          <Button label="Tester le patient" icon="pi pi-comments" severity="secondary" outlined :loading="busy === 'test'"
+          <Button :label="noPatient ? 'Tester la station' : 'Tester le patient'" icon="pi pi-comments" severity="secondary" outlined :loading="busy === 'test'"
                   :disabled="busy !== null" @click="testPatient" />
           <Button v-if="canEdit" :label="detail.status === 'published' ? 'Publier une nouvelle version' : 'Publier'" icon="pi pi-send"
                   :loading="busy === 'publish'" :disabled="busy !== null || counts.erreur > 0"
@@ -290,6 +302,7 @@ onBeforeUnmount(() => {
               <Tab value="faits">Ce que sait le patient <span class="count">{{ sheet.facts.length }}</span></Tab>
               <Tab value="examen">Examen clinique</Tab>
               <Tab value="correction">Correction</Tab>
+              <Tab value="pedagogie">Pédagogie</Tab>
             </TabList>
             <fieldset class="sheet-fieldset" :disabled="!canEdit">
             <TabPanels>
@@ -302,10 +315,22 @@ onBeforeUnmount(() => {
                   </div>
                   <div class="row">
                     <div class="field">
+                      <label>Domaine de compétence</label>
+                      <Select v-model="sheet.station.domain" :options="DOMAINS" option-label="label" option-value="value" fluid />
+                    </div>
+                    <div class="field">
+                      <label>Interlocuteur de l'étudiant</label>
+                      <SelectButton v-model="sheet.station.interlocutor" :options="INTERLOCUTORS" option-label="label"
+                                    option-value="value" :allow-empty="false" />
+                    </div>
+                  </div>
+                  <p v-if="sheet.station.source" class="source">Source : {{ sheet.station.source }}</p>
+                  <div class="row">
+                    <div v-if="!noPatient" class="field">
                       <label for="setting">Lieu</label>
                       <InputText id="setting" v-model="sheet.station.setting" fluid placeholder="aux urgences, au cabinet..." />
                     </div>
-                    <div class="field">
+                    <div v-if="!noPatient" class="field">
                       <label for="role">Rôle de l'étudiant</label>
                       <InputText id="role" v-model="sheet.station.student_role" fluid placeholder="l'interne de garde" />
                     </div>
@@ -331,7 +356,12 @@ onBeforeUnmount(() => {
                                  option-group-children="items" option-label="label" option-value="value" filter display="chip" fluid
                                  placeholder="Situations de départ couvertes" empty-message="Aucune situation : importez le référentiel" />
                   </div>
-                  <div class="field narrow-wide">
+                  <div class="field" data-field="station.documents">
+                    <label>Documents de la vignette</label>
+                    <DocumentsEditor v-model="sheet.station.documents" :case-id="id" />
+                    <small>Montrés à l'étudiant dès le début de la station (ECG, imagerie, résultats...).</small>
+                  </div>
+                  <div v-if="!noPatient" class="field narrow-wide">
                     <label>Voix du patient (mode oral)</label>
                     <Select v-model="sheet.station.voice_id" :options="voiceOptions" option-label="label" option-value="value" fluid />
                   </div>
@@ -340,7 +370,10 @@ onBeforeUnmount(() => {
 
               <!-- Patient -->
               <TabPanel value="patient">
-                <div class="form">
+                <Message v-if="noPatient" severity="secondary" :closable="false">
+                  Station sans interlocuteur : l'étudiant expose son raisonnement aux examinateurs, il n'y a pas de patient à jouer.
+                </Message>
+                <div v-else class="form">
                   <div class="row">
                     <div class="field"><label for="fn">Prénom</label><InputText id="fn" v-model="sheet.patient.first_name" fluid /></div>
                     <div class="field"><label for="ln">Nom</label><InputText id="ln" v-model="sheet.patient.last_name" fluid /></div>
@@ -395,12 +428,17 @@ onBeforeUnmount(() => {
 
               <!-- Faits -->
               <TabPanel value="faits">
+                <Message v-if="noPatient" severity="secondary" :closable="false">
+                  Station sans interlocuteur : pas de faits à révéler. Les données utiles sont dans la vignette et ses documents.
+                </Message>
+                <template v-else>
                 <p class="lead" data-field="facts">
                   Écrivez des faits, pas des instructions : ce que le patient sait et comment il le dit. Il ne révèle
                   « seulement si on lui demande » que lorsque l'étudiant pose la question, et répond « je ne sais pas »
                   à ce qui n'est pas dans la fiche.
                 </p>
                 <FactsEditor v-model="sheet.facts" :issues="issues" />
+                </template>
               </TabPanel>
 
               <!-- Examen clinique -->
@@ -445,7 +483,16 @@ onBeforeUnmount(() => {
                     <label>Grille d'évaluation</label>
                     <GridEditor v-model="sheet.correction.grid" :facts="sheet.facts" :issues="issues" />
                   </div>
+                  <div class="field" data-field="correction.scales">
+                    <label>Échelles d'attitude</label>
+                    <ScalesEditor v-model="sheet.correction" />
+                  </div>
                 </div>
+              </TabPanel>
+
+              <!-- Pédagogie (débriefing) -->
+              <TabPanel value="pedagogie">
+                <TeachingEditor v-model="sheet.correction.teaching" />
               </TabPanel>
             </TabPanels>
             </fieldset>
@@ -507,8 +554,11 @@ onBeforeUnmount(() => {
                 <AssistantPanel v-model:sheet="sheet" :case-id="id" @applied="onApplied" />
               </TabPanel>
               <TabPanel value="preview">
-                <p class="muted">Ce que reçoit le modèle patient, compilé depuis la fiche (lecture seule).</p>
-                <pre class="prompt">{{ detail.preview?.patient_prompt }}</pre>
+                <template v-if="detail.preview?.patient_prompt">
+                  <p class="muted">Ce que reçoit le modèle patient, compilé depuis la fiche (lecture seule).</p>
+                  <pre class="prompt">{{ detail.preview.patient_prompt }}</pre>
+                </template>
+                <p v-else class="muted">Station sans interlocuteur : aucun patient n'est joué.</p>
                 <h4>Versions</h4>
                 <ul class="versions">
                   <li v-for="v in published" :key="v.id">Version {{ v.version }} publiée le {{ new Date(v.created_at).toLocaleString('fr-FR') }}</li>
@@ -548,6 +598,7 @@ onBeforeUnmount(() => {
 .row > .field.narrow { flex: 0 0 8rem; min-width: 8rem; }
 .narrow-wide { max-width: 20rem; }
 .lead { color: #475569; font-size: 0.92rem; margin: 0 0 1rem; }
+.source { margin: -0.4rem 0 0; color: #64748b; font-size: 0.85rem; }
 .count { margin-left: 0.35rem; font-size: 0.75rem; background: #e2e8f0; border-radius: 999px; padding: 0 0.45rem; }
 .reaction { display: flex; gap: 0.4rem; align-items: center; margin-bottom: 0.35rem; }
 .reaction.proposed :deep(input) { border-color: #f59e0b; }

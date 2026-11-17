@@ -451,8 +451,8 @@ class VoiceConversation:
                         self._saved_turns.add(asyncio.current_task())
                         speaker.message_id = value.patient_message_id
                         speaker.final_words = _reply_words(value.patient_reply)
-                        if value.blocked:
-                            # Message refusé : avertissement écrit, pas de voix
+                        if value.blocked or value.silent:
+                            # Message refusé (avertissement écrit) ou station sans interlocuteur : pas de voix
                             speaker.mark_done()
                             await self.send_json({"type": "done", **value.model_dump()})
                             return

@@ -59,6 +59,29 @@ class EvaluationOutput(BaseModel):
     evaluation: EvaluationResult
 
 
+class ScaleRating(BaseModel):
+    """Cotation d'une échelle d'attitude"""
+    scale_id: str = Field(description="Identifiant de l'échelle")
+    level: int = Field(ge=0, le=4, description="0 inacceptable, 1 insuffisante, 2 suffisante, 3 satisfaisante, 4 remarquable")
+    justification: str = Field(description="Justification avec passages du transcript")
+
+
+class GlobalRating(BaseModel):
+    """Évaluation globale de la performance"""
+    level: int = Field(ge=0, le=4)
+    justification: str
+
+
+class EvaluationResultWithScales(EvaluationResult):
+    scales: List[ScaleRating] = Field(description="Une cotation par échelle d'attitude demandée")
+    global_performance: GlobalRating
+
+
+class EvaluationOutputWithScales(BaseModel):
+    """Évaluation avec échelles d'attitude (format des ECOS nationaux)"""
+    evaluation: EvaluationResultWithScales
+
+
 # ==================== ANCIEN ARBITRE (NON UTILISÉ PAR LES ROUTES) ====================
 # Remplacé par arbiter.py (préfiltre, cache, sortie JSON compacte, client réutilisé).
 # Conservé uniquement pour comparaison : python scripts/arbiter_bench.py --legacy
@@ -449,7 +472,15 @@ def evaluate_attempt_with_vllm(
         api_key="dummy-key"
     )
     
-    grid_json = json.dumps(evaluation_grid, ensure_ascii=False, indent=2)
+    from scoring import scales_prompt
+
+    scales = evaluation_grid.get("scales") or []
+    global_rating = bool(evaluation_grid.get("global_rating"))
+    with_scales = global_rating or any(sc.get("observable", True) for sc in scales)
+    output_model = EvaluationOutputWithScales if with_scales else EvaluationOutput
+    grid_json = json.dumps({"items": evaluation_grid.get("items", []),
+                            "total_points": evaluation_grid.get("total_points")}, ensure_ascii=False, indent=2)
+    scales_section = scales_prompt(scales, global_rating) if with_scales else ""
     
     system_instruction = f"""Tu es un évaluateur d'ECOS (Examen Clinique Objectif Structuré).
 Tu analyses la performance de l'étudiant et remplis la grille d'évaluation de manière OBJECTIVE.
@@ -459,6 +490,12 @@ Tu analyses la performance de l'étudiant et remplis la grille d'évaluation de 
 
 [GRILLE D'ÉVALUATION]
 {grid_json}
+
+{scales_section}
+
+STATION SANS INTERLOCUTEUR :
+- Si le transcript commence par "[STATION SANS INTERLOCUTEUR]", l'étudiant parle seul devant les examinateurs.
+  Un item formulé "explique au patient" est validé si l'étudiant l'explique aux examinateurs.
 
 RÈGLES CRITIQUES (ANTI-HALLUCINATION):
 - Tu dois te baser UNIQUEMENT sur le transcript fourni.
@@ -492,7 +529,7 @@ IMPORTANT (clinique réaliste):
     
     logger.info(f"📤 Envoi évaluation à vLLM avec structured output (modèle: {model})")
     logger.info(f"📝 Transcript: {len(transcript)} caractères")
-    logger.info(f"🔧 Utilisation du schéma Pydantic: EvaluationOutput")
+    logger.info(f"🔧 Utilisation du schéma Pydantic: {output_model.__name__}")
     
     messages = [
         {"role": "system", "content": system_instruction},
@@ -512,7 +549,7 @@ IMPORTANT (clinique réaliste):
                     "type": "json_schema",
                     "json_schema": {
                         "name": "evaluation_output",
-                        "schema": EvaluationOutput.model_json_schema(),
+                        "schema": output_model.model_json_schema(),
                         "strict": True
                     }
                 }
@@ -533,7 +570,7 @@ IMPORTANT (clinique réaliste):
             
             # Parser et valider avec Pydantic
             try:
-                validated_output = EvaluationOutput.model_validate_json(result_text)
+                validated_output = output_model.model_validate_json(result_text)
                 logger.info(f"✅ Validation Pydantic réussie: {len(validated_output.evaluation.items)} items")
                 
                 # Convertir en dict pour compatibilité avec le reste du code

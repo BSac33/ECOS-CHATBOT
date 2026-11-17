@@ -5,7 +5,7 @@ from sqlmodel import Session, select
 from datetime import datetime, timedelta
 from uuid import UUID
 from dataclasses import dataclass, field
-from typing import Any, AsyncIterator, Callable, ContextManager
+from typing import Any, AsyncIterator, Callable, ContextManager, Optional
 from db import engine, get_session
 import json
 import os
@@ -16,6 +16,7 @@ from arbiter import Verdict, arbitrate, prefilter
 from patient_agent import AgentEvent, CaseToolContext, DocumentRef, PatientAgentResult, StreamItem, stream_patient_agent
 from attachment_routes import find_matching_attachments
 from contextlib import aclosing, contextmanager, nullcontext
+import case_publishing
 import logging 
 import asyncio
 from auth import check_authorization 
@@ -109,13 +110,7 @@ async def create_attempt(
     session.refresh(attempt)
 
     # Ajouter un message système avec les instructions pour l'étudiant
-    instruction_msg = Message(
-        attempt_id=attempt.id,
-        role=ChatRole.system,
-        content=version.student_instructions if version else case.student_instructions,
-        created_at=datetime.utcnow()
-    )
-    session.add(instruction_msg)
+    add_start_messages(session, attempt, version, case)
     session.commit()
 
     return AttemptOut(
@@ -155,6 +150,24 @@ def get_messages(attempt_id: UUID, session: Session = Depends(get_session), user
         for m in msgs
     ]
 
+def add_start_messages(session: Session, attempt: Attempts, version: Optional[CaseVersion], case: ClinicalCase) -> None:
+    """Consignes, puis documents remis avec la vignette (ECG, imagerie...) affichés dès le début."""
+    t0 = datetime.utcnow()
+    session.add(Message(attempt_id=attempt.id, role=ChatRole.system, created_at=t0,
+                        content=(version.student_instructions if version else case.student_instructions) or ""))
+    info = case_publishing.runtime(version)
+    for i, doc in enumerate((info or {}).get("documents") or [], start=1):
+        try:
+            attachment_id = UUID(doc["attachment_id"])
+        except (TypeError, ValueError):
+            continue
+        if session.get(Attachment, attachment_id) is None:
+            continue
+        session.add(Message(attempt_id=attempt.id, role=ChatRole.examiner, attachment_id=attachment_id,
+                            content=f"{EXAMINER_DOCUMENT_PREFIX}{doc['label'] or 'Document'}",
+                            created_at=t0 + timedelta(microseconds=i)))
+
+
 @router.get("/attempts/{attempt_id}/case-info")
 def get_case_info(attempt_id: UUID, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
     """Récupère les informations du cas clinique associé à un attempt"""
@@ -167,12 +180,16 @@ def get_case_info(attempt_id: UUID, session: Session = Depends(get_session), use
         raise HTTPException(500, "Case not found")
     
     version = attempt_version(session, attempt)
+    info = case_publishing.runtime(version) or {}
     return {
         "case_id": case.id,
         "title": version.title if version else case.title,
         "station_type": case.station_type,
         "duration_seconds": version.duration_seconds if version else case.duration_seconds,
         "is_test": attempt.is_test,
+        # "aucun" : station sans interlocuteur (l'étudiant expose à voix haute, personne ne répond)
+        "interlocutor": info.get("interlocutor", "patient"),
+        "domain": info.get("domain"),
     }
 
 
@@ -304,6 +321,7 @@ class _Turn:
     keyword_docs: list[DocumentRef] = field(default_factory=list)
     modality: str = "text"  # "voice" pour un tour dit à l'oral
     voice_id: str | None = None
+    silent: bool = False    # station sans interlocuteur : rien ne répond
 
 
 def _prepare_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: User, modality: str = "text") -> _Turn:
@@ -335,23 +353,28 @@ def _prepare_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: Use
             "Vous pouvez maintenant procéder à l'évaluation."
         )
 
-    # Vérifier que la station nécessite une impersonation patient
-    # Pour les stations d'analyse (exam_analysis, procedure), il n'y a PAS de conversation en temps réel
+    # Version jouée (publiée, ou brouillon testé par un enseignant)
+    version = attempt_version(session, attempt)
+    info = case_publishing.runtime(version)
+    if info is not None and info["interlocutor"] == "aucun":
+        # Station sans interlocuteur : l'étudiant expose son raisonnement, rien ne répond
+        return _Turn(attempt_id=attempt_id, message=payload.message, patient_prompt="", history=[],
+                     station_state=[], ctx=CaseToolContext.from_case(case), use_agent=False,
+                     modality=modality, silent=True)
+
+    # Cas sans fiche (créés avant l'atelier) : seules les stations avec patient ont un chat
     requires_patient_impersonation = case.station_type in [
         StationType.patient_interview,
         StationType.diagnosis_announcement,
         StationType.mixed
     ]
-    
-    if not requires_patient_impersonation:
+    if info is None and not requires_patient_impersonation:
         raise HTTPException(
             400, 
             "Cette station ne supporte pas le chat en temps réel. "
             "L'étudiant doit soumettre sa réponse complète puis demander l'évaluation via /attempts/{id}/evaluate"
         )
-    
-    # Version jouée (publiée, ou brouillon testé par un enseignant)
-    version = attempt_version(session, attempt)
+
     patient_prompt = version.patient_prompt if version else case.patient_prompt
     if not patient_prompt:
         raise HTTPException(500, "Station configurée sans patient_prompt")
@@ -532,6 +555,15 @@ async def _run_turn(turn: _Turn, write_session: Callable[[], ContextManager[Sess
         ("done", ChatOut)                   fin du tour, après persistance (bloqué ou non)
       ou ("error", (status_http, message))  échec du patient : rien n'est enregistré
     """
+    if turn.silent:
+        # Station sans interlocuteur : seule la parole de l'étudiant est enregistrée
+        with write_session() as s:
+            s.add(Message(attempt_id=turn.attempt_id, role=ChatRole.student, content=turn.message,
+                          modality=turn.modality, created_at=datetime.now()))
+            s.commit()
+        yield ("done", ChatOut(patient_reply="", silent=True))
+        return
+
     # Cas flagrant (insulte explicite, demande de grille...) : verdict immédiat,
     # sans appel LLM et sans même lancer la génération du patient.
     verdict = prefilter(turn.message)

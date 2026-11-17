@@ -50,8 +50,51 @@ export interface PatientProfile {
   reactions: Reaction[]
 }
 
+export type Domain =
+  | 'entretien_interrogatoire' | 'examen_clinique' | 'synthese_paraclinique' | 'strategie_diagnostique'
+  | 'strategie_prise_en_charge' | 'education_prevention' | 'annonce_information' | 'urgence_vitale'
+  | 'communication_interprofessionnelle' | 'iconographie' | 'procedure'
+
+export const DOMAIN_LABELS: Record<Domain, string> = {
+  entretien_interrogatoire: 'Entretien / interrogatoire',
+  examen_clinique: 'Examen clinique',
+  synthese_paraclinique: "Synthèse de résultats d'examens paracliniques",
+  strategie_diagnostique: 'Stratégie diagnostique',
+  strategie_prise_en_charge: 'Stratégie pertinente de la prise en charge',
+  education_prevention: 'Éducation / prévention',
+  annonce_information: 'Annonce / information du patient',
+  urgence_vitale: 'Urgence vitale',
+  communication_interprofessionnelle: 'Communication interprofessionnelle',
+  iconographie: 'Iconographie',
+  procedure: 'Procédure',
+}
+
+/** Échelles d'attitude des ECOS nationaux (cotées de 0 à 4) */
+export const STANDARD_SCALES: Record<string, string> = {
+  ecouter: 'Aptitude à écouter',
+  renseigner: 'Aptitude à fournir des renseignements au patient / aux aidants',
+  structurer_interrogatoire: "Aptitude à structurer l'interrogatoire",
+  questionner: 'Aptitude à questionner',
+  procedure: 'Aptitude à réaliser un geste / une procédure',
+  planifier_soins: 'Aptitude à planifier les soins',
+  proposer_prise_en_charge: 'Aptitude à proposer une prise en charge',
+  cooperer: 'Aptitude à coopérer avec les pairs',
+  synthese: 'Aptitude à faire la synthèse des données',
+  structurer_examen: "Aptitude à structurer l'examen clinique",
+  mener_examen: "Aptitude à mener l'examen clinique",
+  non_verbale: 'Communication non verbale',
+  communication_pairs: 'Communication avec les pairs',
+}
+export const LEVEL_NAMES = ['inacceptable', 'insuffisante', 'suffisante', 'satisfaisante', 'remarquable']
+
+export interface StationDocument { id: string; label: string; attachment_id: string | null }
+
 export interface StationInfo {
   title: string
+  domain: Domain
+  interlocutor: 'patient' | 'aucun'
+  documents: StationDocument[]
+  source: string
   station_type: string
   duration_minutes: number
   setting: string
@@ -74,6 +117,15 @@ export interface GridItem {
   sources: SourceRef[]
 }
 
+export interface AttitudeScale { id: string; label: string; levels: string[]; observable: boolean }
+
+export interface TeachingContent {
+  objectives: string[]
+  key_points: { label: string; text: string }[]
+  model_script: string
+  comments: string
+}
+
 export interface CaseSheet {
   schema_version: number
   station: StationInfo
@@ -81,7 +133,15 @@ export interface CaseSheet {
   facts: Fact[]
   never_says: string[]
   exam_findings: ExamFindingEntry[]
-  correction: { expected_diagnosis: string; expected_management: string; grid: GridItem[] }
+  correction: {
+    expected_diagnosis: string
+    expected_management: string
+    grid: GridItem[]
+    scales: AttitudeScale[]
+    global_rating: boolean
+    attitude_weight: number
+    teaching: TeachingContent
+  }
 }
 
 export type IssueLevel = 'erreur' | 'attention' | 'conseil'
@@ -110,7 +170,7 @@ export interface CaseDetail {
   sheet: CaseSheet | null
   legacy: boolean
   preview: {
-    patient_prompt: string
+    patient_prompt: string | null
     scenario_context: string
     student_instructions: string
     grid_items: { id: string; criterion: string; points: number; description: string }[]
@@ -206,6 +266,19 @@ export const authoringApi = {
   test: (id: number) => call<{ attempt_id: string; version_id: number }>(`/cases/${id}/test`, { method: 'POST' }),
   assist: (id: number, task: AssistTask, sheet: CaseSheet, instructions = '') =>
     call<Proposal>(`/cases/${id}/assist`, { method: 'POST', body: JSON.stringify({ task, sheet, instructions }) }),
+  uploadDocument: async (id: number, file: File, label: string) => {
+    const form = new FormData()
+    form.append('file', file)
+    form.append('label', label)
+    const response = await fetch(`${API_BASE_URL}/authoring/cases/${id}/documents`, {
+      method: 'POST', body: form, credentials: 'include',
+    })
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({ detail: 'Erreur réseau' }))
+      throw new ApiError(response.status, body.detail)
+    }
+    return response.json() as Promise<{ attachment_id: string; filename: string; mime_type: string; url: string }>
+  },
   items: () => call<ReferenceItem[]>('/reference/items'),
   situations: (items: number[]) =>
     call<ReferenceSituation[]>(`/reference/situations?items=${items.join(',')}`),
@@ -234,4 +307,8 @@ export function emptyGridItem(): GridItem {
 
 export function isTeacher(user: { role?: string } | null | undefined): boolean {
   return user?.role === 'teacher' || user?.role === 'admin'
+}
+
+export function newDocumentId(): string {
+  return newId('f').replace(/^f_/, 'd_')
 }

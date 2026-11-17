@@ -49,7 +49,7 @@ function move(index: number, delta: number) {
       </div>
       <Textarea v-model="item.description" auto-resize rows="1" fluid
                 placeholder="Comment l'attribuer (ex. « Tabac + quantité = 1 pt ; tabac seul = 0,5 pt »)" />
-      <MultiSelect v-model="item.fact_ids" :options="factOptions" option-label="label" option-value="value"
+      <MultiSelect v-if="facts.length" v-model="item.fact_ids" :options="factOptions" option-label="label" option-value="value"
                    display="chip" filter placeholder="Faits que l'étudiant doit obtenir pour valider l'item" fluid
                    :max-selected-labels="6" />
       <div v-if="item.generated" class="proposed-bar">

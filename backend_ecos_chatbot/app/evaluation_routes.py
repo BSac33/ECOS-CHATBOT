@@ -22,7 +22,9 @@ from models import (
     EvaluationItemResult,
     StationType
 )
+import case_publishing
 from ai_chat_utils import evaluate_attempt_with_llm
+from scoring import score_evaluation
 from auth import check_authorization
 from models import UserRole, User
 
@@ -32,7 +34,11 @@ router = APIRouter()
 INTERRUPTION_LABEL = "coupé par l'étudiant"
 
 
-def build_evaluation_transcript(messages: list) -> tuple[str, int]:
+NO_INTERLOCUTOR_HEADER = ("[STATION SANS INTERLOCUTEUR] L'étudiant expose son raisonnement à voix haute "
+                          "devant les examinateurs, qui n'interviennent pas.")
+
+
+def build_evaluation_transcript(messages: list, no_interlocutor: bool = False) -> tuple[str, int]:
     """Transcript soumis à l'évaluateur, et nombre de fois où l'étudiant a coupé la
     parole au patient. Une réplique coupée n'y figure que pour ce qui a été prononcé."""
     parts = []
@@ -57,6 +63,8 @@ def build_evaluation_transcript(messages: list) -> tuple[str, int]:
             parts.append(f"EXAMINATEUR: {msg.content}")
         # On ignore les messages system
     transcript = "\n\n".join(parts)
+    if no_interlocutor:
+        return f"{NO_INTERLOCUTOR_HEADER}\n\n{transcript}", 0
     if spoken_mode:
         header = (f"[COMMUNICATION ORALE] L'étudiant a coupé la parole au patient {interruptions} fois"
                   if interruptions else
@@ -118,9 +126,14 @@ def evaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_s
     # Grille et contexte : ceux de la version du cas qui a été jouée (une
     # republication ne change pas la correction d'une tentative passée)
     version = session.get(CaseVersion, attempt.case_version_id) if attempt.case_version_id else None
+    info = case_publishing.runtime(version) or {}
     if version is not None:
         grid_structure = {"items": version.grid_items, "version": float(version.version),
-                          "total_points": version.total_points}
+                          "total_points": version.total_points,
+                          # Échelles d'attitude et évaluation globale (format des ECOS nationaux)
+                          "scales": info.get("scales") or [],
+                          "global_rating": bool(info.get("global_rating")),
+                          "attitude_weight": info.get("attitude_weight", 0.25)}
         title, instructions, scenario = version.title, version.student_instructions, version.scenario_context
     else:
         eval_grid_stmt = select(EvaluationGrid).where(
@@ -153,7 +166,7 @@ def evaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_s
         )
     
     # Construire le transcript (commandes filtrées, coupures de parole signalées)
-    transcript, _ = build_evaluation_transcript(messages)
+    transcript, _ = build_evaluation_transcript(messages, no_interlocutor=info.get("interlocutor") == "aucun")
     
     # Préparer le contexte du cas
     case_context = f"""
@@ -180,9 +193,10 @@ Contexte du scénario:
             f"Erreur lors de l'évaluation par le LLM: {str(e)}"
         )
     
-    # Calculer les points obtenus et possibles pour les analytics
-    points_obtained = evaluation_result.get("total_score", 0.0)
-    points_possible = grid_structure["total_points"]
+    # Totaux recalculés, échelles d'attitude, note /20 (jamais les sommes du LLM)
+    evaluation_result = score_evaluation(evaluation_result, grid_structure)
+    points_obtained = evaluation_result["evaluation"]["score_20"]
+    points_possible = 20.0
     
     # Sauvegarder le résultat de l'évaluation dans la base de données
     # Créer une nouvelle évaluation
@@ -200,7 +214,7 @@ Contexte du scénario:
     evaluation_result_id = new_evaluation.id
     
     # Créer les résultats individuels pour chaque item
-    evaluation_items = evaluation_result.get("items", [])
+    evaluation_items = evaluation_result["evaluation"].get("items", [])
     for item in evaluation_items:
         item_result = EvaluationItemResult(
             evaluation_result_id=evaluation_result_id,
@@ -208,7 +222,7 @@ Contexte du scénario:
             case_id=case.id,
             user_id=user_id,
             edn_code=item.get("edn_code", ""),
-            item_name=item.get("item_name", ""),
+            item_name=item.get("criterion", ""),
             points_obtained=item.get("points_obtained", 0.0),
             points_possible=item.get("points_possible", 0.0),
             justification=item.get("justification", ""),
@@ -266,4 +280,27 @@ def get_transcript(attempt_id: UUID, session: Session = Depends(get_session), us
         "transcript": transcript,
         # En ECOS, on ne coupe pas la parole au patient
         "interruptions": interruptions,
+    }
+
+
+@router.get("/attempts/{attempt_id}/teaching")
+def get_teaching(attempt_id: UUID, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
+    """Contenu pédagogique de la station (objectifs, éléments clés, script, commentaires).
+    Seulement après la fin de la tentative : il ne doit pas aider pendant la station."""
+    attempt = session.get(Attempts, attempt_id)
+    if not attempt or attempt.user_id != user.id:
+        raise HTTPException(404, "Tentative non trouvée")
+    if not attempt.is_completed:
+        raise HTTPException(400, "Disponible après la fin de la station.")
+    version = session.get(CaseVersion, attempt.case_version_id) if attempt.case_version_id else None
+    sheet = (version.sheet or {}) if version else {}
+    teaching = (sheet.get("correction") or {}).get("teaching") or {}
+    station = sheet.get("station") or {}
+    return {
+        "title": version.title if version else None,
+        "source": station.get("source") or None,
+        "objectives": teaching.get("objectives") or [],
+        "key_points": teaching.get("key_points") or [],
+        "model_script": teaching.get("model_script") or "",
+        "comments": teaching.get("comments") or "",
     }

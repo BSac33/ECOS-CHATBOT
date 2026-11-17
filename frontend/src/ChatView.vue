@@ -54,6 +54,12 @@
                 <Button label="Couper" size="small" text severity="secondary" @click="voice.interrupt()" />
             </div>
 
+            <!-- Station sans interlocuteur : rappel de la consigne -->
+            <div v-if="noInterlocutor && !consulting" class="silent-hint">
+                <i class="pi pi-info-circle"></i>
+                Station sans interlocuteur : exposez votre raisonnement à voix haute ou par écrit. Les examinateurs vous écoutent sans intervenir.
+            </div>
+
             <!-- Saisie : clavier ou voix -->
             <div v-if="!consulting" class="input-row">
                 <Textbox 
@@ -145,6 +151,8 @@ interface ChatResponse {
     blocked?: boolean;
     examiner_notes?: ExaminerNote[];
     patient_message_id?: string | null;
+    /** Station sans interlocuteur : la parole de l'étudiant est enregistrée, personne ne répond */
+    silent?: boolean;
 }
 
 /**
@@ -187,6 +195,8 @@ const messages = ref<ChatMessage[]>([]);
 const isLoading = ref(true);
 const isSendingMessage = ref(false);
 const isPatientTyping = ref(false);
+/** Station sans patient ni professionnel simulé : l'étudiant parle seul devant les examinateurs */
+const noInterlocutor = ref(false);
 
 // ============= FONCTIONS UTILITAIRES =============
 
@@ -291,7 +301,7 @@ function startTurn(studentMessageId: string, modality: 'text' | 'voice'): Turn {
         return patientMessage;
     };
 
-    isPatientTyping.value = true;
+    isPatientTyping.value = !noInterlocutor.value;
     return {
         delta(text) {
             ensurePatientBubble().content += text;
@@ -305,7 +315,9 @@ function startTurn(studentMessageId: string, modality: 'text' | 'voice'): Turn {
         },
         done(final) {
             isPatientTyping.value = false;
-            if (final.blocked) {
+            if (final.silent) {
+                // Personne ne répond : seule la parole de l'étudiant est enregistrée
+            } else if (final.blocked) {
                 // Le message n'entre pas dans le transcript : on le marque comme non transmis
                 // et on affiche l'avertissement comme message système (hors personnage).
                 const sent = messages.value.find(m => m.id === studentMessageId);
@@ -583,6 +595,8 @@ function handleVoiceEvent(event: VoiceEvent) {
             if (final.blocked) {
                 consultationNotice.value = final.patient_reply;
                 awaitingVoice.value = false;
+            } else if (final.silent) {
+                awaitingVoice.value = false;   // personne ne répond : pas de voix à attendre
             }
             break;
         }
@@ -644,8 +658,17 @@ function handleVoiceEvent(event: VoiceEvent) {
  * 1. Charger l'historique des messages
  * 2. Initialiser le scroll en bas de page
  */
+async function loadStationInfo() {
+    try {
+        const response = await fetch(`/chat/attempts/${attemptId}/case-info`, { credentials: 'include' });
+        if (response.ok) noInterlocutor.value = (await response.json()).interlocutor === 'aucun';
+    } catch {
+        // information facultative : comportement par défaut (avec patient)
+    }
+}
+
 onMounted(async () => {
-    await loadMessages();
+    await Promise.all([loadMessages(), loadStationInfo()]);
 });
 
 onBeforeUnmount(() => {
@@ -655,6 +678,17 @@ onBeforeUnmount(() => {
 </script>
 
 <style scoped>
+.silent-hint {
+    display: flex;
+    gap: .5rem;
+    align-items: center;
+    padding: .5rem .75rem;
+    border-radius: 8px;
+    background: #f1f5f9;
+    color: #334155;
+    font-size: .9rem;
+}
+
 /* Animation de l'indicateur de frappe (typing indicator) */
 .typing-indicator {
     display: flex;

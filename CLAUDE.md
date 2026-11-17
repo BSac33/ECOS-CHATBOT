@@ -26,6 +26,9 @@ make reset
 
 # Import the official cardiology reference (CNEC/SFC) used by the case authoring assistant
 make corpus
+
+# Import private station packs (book content, never in git) from backend_ecos_chatbot/app/private/stations/
+make stations
 ```
 
 ### Backend
@@ -110,6 +113,9 @@ alembic downgrade -1
 - `authoring_assistant.py` - "Générer" actions (interview, negatives, lay wording, persona, grid, exam) grounded on the official corpus, structured output, deterministic filtering; proposals marked `generated=True` until the teacher validates them. vLLM server (`AUTHORING_*`, defaults to `VLLM_*`)
 - `corpus.py` - Official 2nd-cycle reference: SFC/CNEC chapter parser (R2C item, starting situations, ranked objectives, ranked excerpts), idempotent `store_chapter`, BM25 `search_corpus`. Import: `scripts/ingest_corpus.py`. Texts live in the DB only, never in the repo (agreement of the cardiology college and UNESS; tests use a fictitious chapter)
 - `case_examples.py` - Dupont case as a structured sheet (used by the seed and tests)
+- Station formats: `station.domain` (11 ECOS-N domains), `station.interlocutor` (`patient` | `aucun`: no PS/PSS, the student talks alone, nothing replies), `station.documents` (vignette documents shown at start), attitude scales (0-4) + global rating, teaching content shown at debrief
+- `scoring.py` - Recomputes item totals, attitude scales and the /20 score (`20 × ((1−p)·items + p·scales/4)`, p = `attitude_weight`, default 0.25); never trusts LLM sums
+- `station_packs.py` - Private station packs (JSON sheets + images, dir or .zip) imported idempotently by `clinical_cases.source_key`; `scripts/import_stations.py`; the seed imports `private/stations/` (git-ignored) and `STATION_PACKS`. Protected content (e.g. the author's ECOS book) must never be committed: the repository is public
 
 **AI Utilities:**
 - `ai_chat_utils.py` - Gemini API integration for patient simulation
@@ -168,6 +174,7 @@ Body: {"case_id": 1}
 → Sets expires_at based on the version duration
 → Students cannot start a draft; teachers test drafts via POST /authoring/cases/{id}/test
   (attempts.is_test, excluded from user stats)
+→ Start messages: instructions + vignette documents (examiner messages with attachment)
 ```
 
 **2. Chat (for patient_interview stations only)**
@@ -183,6 +190,8 @@ Body: {"message": "Bonjour, que puis-je faire pour vous?"}
 → Else saves student + patient messages, plus "examiner" messages for tool results
   (exam findings, documents shown) and moderation_events for flags
 → Returns patient reply + attachments + examiner_notes
+→ Station without interlocutor (version sheet interlocutor="aucun"): only the student message is
+  stored, ChatOut.silent=true, no patient/arbiter/TTS
 ```
 
 **3. Finalization**
@@ -197,8 +206,9 @@ POST /chat/attempts/{id}/finalize
 POST /evaluation/attempts/{id}/evaluate
 → Retrieves full transcript from chat_messages
 → Loads evaluation_grids for the case
-→ Calls LLM with structured output (Pydantic)
-→ Returns EvaluationResultOut with items + scores + feedback
+→ Calls LLM with structured output (Pydantic): items + attitude scales + global rating
+→ scoring.score_evaluation recomputes totals and score_20
+→ Returns EvaluationResultOut with items + scales + global_performance + score_20 + feedback
 → Saves to evaluation_results + evaluation_item_results tables (cached)
 ```
 
@@ -351,7 +361,7 @@ Set `LLM_PROVIDER=vllm` in `fastapi.env` and configure vLLM endpoint. The code a
 
 **Core Tables:**
 - `users` - Student/teacher/admin accounts
-- `clinical_cases` - ECOS station definitions (`sheet`: structured case sheet being edited; runtime fields = latest published version; `review_status` + `reviewed_*`: optional peer review)
+- `clinical_cases` - ECOS station definitions (`sheet`: structured case sheet being edited; runtime fields = latest published version; `review_status` + `reviewed_*`: optional peer review; `source_key`: private pack import key)
 - `case_versions` - Frozen compiled versions (`published` | `test`); `attempts.case_version_id` = version played
 - `attempts` - Student attempt sessions (`case_version_id`: version played; `is_test`: teacher test, excluded from stats)
 - `chat_messages` - Conversation transcripts (roles: system, student, patient, examiner; `modality` text|voice; `interrupted_by` + `spoken_content` when the student cut the patient off)

@@ -44,6 +44,8 @@ class ChatOut(BaseModel):
     examiner_notes: List[ExaminerNoteOut] = []
     # Identifiant du message patient enregistré (mode vocal : marquage d'une coupure)
     patient_message_id: Optional[str] = None
+    # Station sans interlocuteur : la parole de l'étudiant est enregistrée, personne ne répond
+    silent: bool = False
 
 class AttachmentUploadOut(BaseModel):
     id: str  # UUID sérialisé
@@ -71,6 +73,23 @@ class EvaluationItemOut(BaseModel):
     is_validated: bool
     justification: str
 
+class ScaleRatingOut(BaseModel):
+    """Échelle d'attitude cotée de 0 à 4 (None : non évaluable ou non évaluée)"""
+    scale_id: str
+    label: str
+    observable: bool = True
+    level: Optional[int] = None
+    level_name: Optional[str] = None
+    justification: Optional[str] = None
+
+
+class GlobalPerformanceOut(BaseModel):
+    label: str
+    level: Optional[int] = None
+    level_name: Optional[str] = None
+    justification: Optional[str] = None
+
+
 class EvaluationResultOut(BaseModel):
     """Résultat complet de l'évaluation d'une tentative"""
     items: List[EvaluationItemOut]
@@ -78,6 +97,13 @@ class EvaluationResultOut(BaseModel):
     total_possible: float
     percentage: float
     general_feedback: str
+    # Format des ECOS nationaux (évaluations récentes) : échelles, performance globale, note /20
+    items_score: Optional[float] = None
+    items_possible: Optional[float] = None
+    scales: List[ScaleRatingOut] = []
+    global_performance: Optional[GlobalPerformanceOut] = None
+    attitude_weight: Optional[float] = None
+    score_20: Optional[float] = None
 
 class EvaluationOut(BaseModel):
     """Enveloppe pour le résultat d'évaluation"""
@@ -311,6 +337,9 @@ class ClinicalCase(SQLModel, table=True):
     review_note: Optional[str] = None
     # Empreinte de la fiche relue : signale les modifications faites depuis la relecture
     reviewed_sheet_hash: Optional[str] = None
+
+    # Station importée d'un pack (ex. "livre-ecos-cardio/ecos01") : clé d'import idempotent
+    source_key: Optional[str] = Field(default=None, unique=True, index=True)
     
     duration_seconds: int
     

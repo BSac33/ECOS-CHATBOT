@@ -14,6 +14,7 @@ marquer comme relue (avec une remarque). Elle reste publiable à tout moment, re
   POST   /authoring/cases                    nouveau brouillon
   GET    /authoring/cases/{id}               fiche + aperçu compilé + vérifications + versions
   PUT    /authoring/cases/{id}/sheet         enregistrer la fiche
+  POST   /authoring/cases/{id}/documents     ajouter un document de vignette (ECG, imagerie...)
   POST   /authoring/cases/{id}/publish       publier (refusé s'il reste des erreurs)
   POST   /authoring/cases/{id}/test          tentative de test du brouillon (auteur ou relecteur)
   POST   /authoring/cases/{id}/review/request demander une relecture (statut « à relire »)
@@ -33,19 +34,20 @@ from datetime import datetime, timedelta
 from typing import List, Optional
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlmodel import Session, select
 
 import authoring_assistant
 import case_publishing
+import chat_routes
 import corpus
 from auth import check_authorization
 from case_sheet import CaseSheet, Issue, blocking, check_sheet, compile_case
 from db import get_session
 from models import (
-    Attempts, CaseVersion, ChatRole, ClinicalCase, EDNItem, ItemSituationLink, Message,
+    Attachment, Attempts, CaseVersion, ChatRole, ClinicalCase, EDNItem, ItemSituationLink, Message,
     StartingSituation, StationType, User, UserRole,
 )
 
@@ -88,7 +90,7 @@ class VersionOut(BaseModel):
 
 
 class CompiledPreview(BaseModel):
-    patient_prompt: str
+    patient_prompt: Optional[str]          # None : station sans interlocuteur
     scenario_context: str
     student_instructions: str
     grid_items: List[dict]
@@ -298,8 +300,7 @@ def test_draft(case_id: int, session: Session = Depends(get_session), user: User
                        case_version_id=version.id, expires_at=now + timedelta(seconds=version.duration_seconds))
     session.add(attempt)
     session.flush()
-    session.add(Message(attempt_id=attempt.id, role=ChatRole.system,
-                        content=version.student_instructions or "Tentative de test", created_at=now))
+    chat_routes.add_start_messages(session, attempt, version, case)
     session.commit()
     return TestAttemptOut(attempt_id=str(attempt.id), version_id=version.id)
 
@@ -416,3 +417,46 @@ def mark_reviewed(case_id: int, payload: ReviewIn, session: Session = Depends(ge
     session.commit()
     session.refresh(case)
     return _detail(session, case, user)
+
+
+# ==================== DOCUMENTS DE LA VIGNETTE ====================
+
+DOCUMENT_TYPES = {"image/png", "image/jpeg", "image/webp", "image/gif", "application/pdf"}
+MAX_DOCUMENT_BYTES = 15_000_000
+
+
+class DocumentOut(BaseModel):
+    attachment_id: str
+    filename: str
+    mime_type: str
+    url: str
+
+
+@router.post("/cases/{case_id}/documents", response_model=DocumentOut)
+async def upload_document(case_id: int, file: UploadFile = File(...), label: str = Form(""),
+                          session: Session = Depends(get_session), user: User = Depends(teacher)):
+    """Fichier d'un document de la vignette ; la fiche le référence ensuite (station.documents)."""
+    import mimetypes
+    from pathlib import Path
+
+    from storage import storage
+
+    case = _own_case(session, case_id, user)
+    data = await file.read()
+    mime = file.content_type or mimetypes.guess_type(file.filename or "")[0] or ""
+    if mime not in DOCUMENT_TYPES:
+        raise HTTPException(415, "Formats acceptés : image (PNG, JPEG, WebP, GIF) ou PDF.")
+    if len(data) > MAX_DOCUMENT_BYTES:
+        raise HTTPException(413, "Fichier trop volumineux (15 Mo maximum).")
+    name = Path(file.filename or "document").name
+    path = f"authoring/{case.id}/{uuid4().hex}{Path(name).suffix.lower()}"
+    url = await storage.save_file(data, path)
+    attachment = Attachment(case_id=case.id, filename=name, stored_filename=Path(path).name,
+                            display_name=label.strip() or name, description=label.strip() or None,
+                            kind="image" if mime.startswith("image/") else "document", mime_type=mime,
+                            size_bytes=len(data), file_path=path, file_url=url)
+    session.add(attachment)
+    session.commit()
+    session.refresh(attachment)
+    return DocumentOut(attachment_id=str(attachment.id), filename=name, mime_type=mime,
+                       url=f"/attachments/download/{attachment.id}")

@@ -176,6 +176,10 @@ class ApiService {
     });
   }
 
+  async getAttemptTeaching(attemptId: string): Promise<any> {
+    return this.request<any>(`/evaluation/attempts/${attemptId}/teaching`);
+  }
+
   async getAttemptTranscript(attemptId: string): Promise<any> {
     return this.request<any>(`/evaluation/attempts/${attemptId}/transcript`);
   }

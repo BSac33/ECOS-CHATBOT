@@ -338,3 +338,28 @@ async def test_admin_can_review_own_case(client):
     await client.post(f"/authoring/cases/{case_id}/review/request")
     r = await client.post(f"/authoring/cases/{case_id}/review", json={"note": ""})
     assert r.status_code == 200 and r.json()["review"]["status"] == "relue" and r.json()["review"]["note"] is None
+
+
+@pytest.mark.asyncio
+async def test_upload_vignette_document(client, session, monkeypatch, tmp_path):
+    import storage as storage_module
+    from models import Attachment
+
+    saved = {}
+
+    async def fake_save(data, path):
+        saved[path] = data
+        return f"/files/{path}"
+    monkeypatch.setattr(storage_module.storage, "save_file", fake_save)
+
+    case_id = await _new_case(client, dupont_sheet())
+    r = await client.post(f"/authoring/cases/{case_id}/documents", data={"label": "Document 1 : ECG"},
+                          files={"file": ("ecg.png", b"\x89PNG...", "image/png")})
+    assert r.status_code == 200, r.text
+    att = session.get(Attachment, __import__("uuid").UUID(r.json()["attachment_id"]))
+    assert att.case_id == case_id and att.display_name == "Document 1 : ECG" and list(saved.values()) == [b"\x89PNG..."]
+    r = await client.post(f"/authoring/cases/{case_id}/documents", files={"file": ("x.exe", b"MZ", "application/x-msdownload")})
+    assert r.status_code == 415
+    client.as_user("autre_prof")
+    r = await client.post(f"/authoring/cases/{case_id}/documents", files={"file": ("ecg.png", b"x", "image/png")})
+    assert r.status_code == 403

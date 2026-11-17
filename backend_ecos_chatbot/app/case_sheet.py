@@ -6,7 +6,11 @@ La fiche est compilée en :
 - prompt du patient (persona, faits à révéler spontanément / seulement sur question,
   signes négatifs, réactions, ce qu'il ne dit jamais) ;
 - contexte de l'évaluateur (diagnostic et prise en charge attendus) ;
-- grille d'évaluation, examen clinique, consignes, voix.
+- grille d'évaluation (items + échelles d'attitude), examen clinique, consignes, voix,
+  documents de la vignette.
+
+Une station peut ne pas avoir d'interlocuteur (« station sans PS ni PSS ») : l'étudiant
+expose son raisonnement à voix haute devant les examinateurs (interprétation d'ECG...).
 
 `check_sheet` signale ce qui manque ou ce qui fragilise le maintien du rôle
 (question sans réponse dans la fiche, jargon dans la bouche du patient, item de
@@ -19,7 +23,7 @@ import unicodedata
 from typing import List, Literal, Optional
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 SCHEMA_VERSION = 1
 
@@ -57,6 +61,56 @@ ANAMNESIS_CHECKLIST = {
     "mode_de_vie": "son mode de vie (tabac, alcool, activité)",
     "contexte": "sa vie personnelle et professionnelle",
 }
+
+
+# Les 11 domaines de compétence des ECOS
+DOMAIN_LABELS = {
+    "entretien_interrogatoire": "Entretien / interrogatoire",
+    "examen_clinique": "Examen clinique",
+    "synthese_paraclinique": "Synthèse de résultats d'examens paracliniques",
+    "strategie_diagnostique": "Stratégie diagnostique",
+    "strategie_prise_en_charge": "Stratégie pertinente de la prise en charge",
+    "education_prevention": "Éducation / prévention",
+    "annonce_information": "Annonce / information du patient",
+    "urgence_vitale": "Urgence vitale",
+    "communication_interprofessionnelle": "Communication interprofessionnelle",
+    "iconographie": "Iconographie",
+    "procedure": "Procédure",
+}
+Domain = Literal[
+    "entretien_interrogatoire", "examen_clinique", "synthese_paraclinique", "strategie_diagnostique",
+    "strategie_prise_en_charge", "education_prevention", "annonce_information", "urgence_vitale",
+    "communication_interprofessionnelle", "iconographie", "procedure",
+]
+# Interlocuteur de l'étudiant : patient (ou proche) standardisé, ou personne (examinateurs muets)
+Interlocutor = Literal["patient", "aucun"]
+
+# Échelles d'attitude des ECOS nationaux (cotées de 0 à 4)
+LEVEL_NAMES = ["inacceptable", "insuffisante", "suffisante", "satisfaisante", "remarquable"]
+GENERIC_LEVELS = [
+    "Performance inacceptable : délétère, dangereuse",
+    "Performance insuffisante : en dessous des attentes",
+    "Performance suffisante : tout juste aux attentes",
+    "Performance satisfaisante : au-dessus des attentes sans être impressionnante",
+    "Performance remarquable : impressionnante",
+]
+STANDARD_SCALES = {
+    "ecouter": "Aptitude à écouter",
+    "renseigner": "Aptitude à fournir des renseignements au patient / aux aidants",
+    "structurer_interrogatoire": "Aptitude à structurer l'interrogatoire",
+    "questionner": "Aptitude à questionner",
+    "procedure": "Aptitude à réaliser un geste / une procédure",
+    "planifier_soins": "Aptitude à planifier les soins",
+    "proposer_prise_en_charge": "Aptitude à proposer une prise en charge",
+    "cooperer": "Aptitude à coopérer avec les pairs",
+    "synthese": "Aptitude à faire la synthèse des données",
+    "structurer_examen": "Aptitude à structurer l'examen clinique",
+    "mener_examen": "Aptitude à mener l'examen clinique",
+    "non_verbale": "Communication non verbale",
+    "communication_pairs": "Communication avec les pairs",
+}
+# Ce que la plateforme ne peut pas observer (regard, posture) : échelle affichée, non notée
+NOT_OBSERVABLE_SCALES = {"non_verbale"}
 
 
 class SourceRef(BaseModel):
@@ -98,9 +152,18 @@ class PatientProfile(BaseModel):
     reactions: List[Reaction] = []
 
 
+class StationDocument(BaseModel):
+    """Document remis avec la vignette (ECG, imagerie...), montré dès le début de la station."""
+    id: str = Field(default_factory=lambda: _id("d"))
+    label: str = ""                          # ex. « Document 1 : tracé-ECG »
+    attachment_id: Optional[str] = None      # pièce jointe du cas (fichier)
+
+
 class StationInfo(BaseModel):
     title: str = ""
-    station_type: str = "patient_interview"
+    domain: Domain = "entretien_interrogatoire"
+    interlocutor: Interlocutor = "patient"
+    station_type: str = "patient_interview"  # dérivé du domaine à la compilation
     duration_minutes: int = 8
     setting: str = ""                        # lieu : urgences, cabinet...
     student_role: str = ""                   # ex. « interne de garde aux urgences »
@@ -108,6 +171,8 @@ class StationInfo(BaseModel):
     edn_items: List[int] = []                # items R2C
     starting_situations: List[int] = []      # situations de départ
     voice_id: Optional[str] = None
+    documents: List[StationDocument] = []
+    source: str = ""                         # ex. « Livre ECOS cardiologie – ECOS 4 »
 
 
 class ExamFindingEntry(BaseModel):
@@ -127,10 +192,37 @@ class GridItem(BaseModel):
     sources: List[SourceRef] = []
 
 
+class AttitudeScale(BaseModel):
+    """Échelle d'attitude cotée de 0 (inacceptable) à 4 (remarquable)."""
+    id: str = ""                             # clé de STANDARD_SCALES ou libre
+    label: str = ""
+    levels: List[str] = []                   # 5 descripteurs (0 à 4) ; vide = descripteurs génériques
+    observable: bool = True                  # False : non évaluable sur la plateforme (non verbal)
+
+
+class KeyPoint(BaseModel):
+    label: str = ""
+    text: str = ""
+
+
+class TeachingContent(BaseModel):
+    """Montré à l'étudiant au débriefing, après la correction."""
+    model_config = ConfigDict(protected_namespaces=())
+
+    objectives: List[str] = []
+    key_points: List[KeyPoint] = []
+    model_script: str = ""                   # proposition de script
+    comments: str = ""                       # commentaires pédagogiques
+
+
 class CorrectionInfo(BaseModel):
     expected_diagnosis: str = ""
     expected_management: str = ""
     grid: List[GridItem] = []
+    scales: List[AttitudeScale] = []
+    global_rating: bool = True               # évaluation globale de la performance (0 à 4, non comptée)
+    attitude_weight: float = 0.25            # part des échelles dans la note /20 (ECOS-N : 20 à 30 %)
+    teaching: TeachingContent = TeachingContent()
 
 
 class CaseSheet(BaseModel):
@@ -229,8 +321,11 @@ def compile_patient_prompt(sheet: CaseSheet) -> str:
 
 def compile_scenario_context(sheet: CaseSheet) -> str:
     """Contexte pour l'évaluateur (jamais montré au patient ni à l'étudiant)."""
-    p, c = sheet.patient, sheet.correction
-    parts = [f"Patient : {_patient_name(p)}" + (f", {p.age} ans" if p.age else "")]
+    p, c, s = sheet.patient, sheet.correction, sheet.station
+    if s.interlocutor == "aucun":
+        parts = ["Station sans interlocuteur : l'étudiant expose son raisonnement à voix haute aux examinateurs."]
+    else:
+        parts = [f"Patient : {_patient_name(p)}" + (f", {p.age} ans" if p.age else "")]
     if c.expected_diagnosis.strip():
         parts.append(f"Diagnostic attendu : {c.expected_diagnosis.strip()}")
     if c.expected_management.strip():
@@ -239,6 +334,50 @@ def compile_scenario_context(sheet: CaseSheet) -> str:
     if facts:
         parts.append("Éléments du dossier :\n" + "\n".join(facts))
     return "\n".join(parts)
+
+
+DOMAIN_STATION_TYPE = {
+    "procedure": "procedure",
+    "iconographie": "exam_analysis",
+    "synthese_paraclinique": "exam_analysis",
+    "annonce_information": "diagnosis_announcement",
+}
+
+INSTRUCTION_NO_INTERLOCUTOR = ("Sur la plateforme : station sans interlocuteur. Exposez votre raisonnement à voix "
+                               "haute (ou par écrit) ; les examinateurs vous écoutent sans intervenir.")
+INSTRUCTION_GESTURES = ("Sur la plateforme : décrivez à voix haute chaque geste que vous réalisez, "
+                        "les examinateurs n'évaluent que ce que vous dites.")
+
+
+def station_type_for(sheet: CaseSheet) -> str:
+    s = sheet.station
+    if s.domain in DOMAIN_STATION_TYPE:
+        return DOMAIN_STATION_TYPE[s.domain]
+    return "patient_interview" if s.interlocutor == "patient" else "exam_analysis"
+
+
+def compile_instructions(sheet: CaseSheet) -> str:
+    s = sheet.station
+    text = s.student_instructions.strip()
+    if not text:
+        return ""
+    if s.interlocutor == "aucun":
+        return f"{text}\n\n{INSTRUCTION_NO_INTERLOCUTOR}"
+    if s.domain in ("procedure", "examen_clinique", "urgence_vitale"):
+        return f"{text}\n\n{INSTRUCTION_GESTURES}"
+    return text
+
+
+def compile_scales(sheet: CaseSheet) -> List[dict]:
+    out = []
+    for sc in sheet.correction.scales:
+        label = sc.label.strip() or STANDARD_SCALES.get(sc.id, "")
+        if not label:
+            continue
+        levels = [lv.strip() for lv in sc.levels] if len(sc.levels) == 5 else list(GENERIC_LEVELS)
+        out.append({"id": sc.id or _slug(label), "label": label, "levels": levels,
+                    "observable": sc.observable and sc.id not in NOT_OBSERVABLE_SCALES})
+    return out
 
 
 def compile_grid_items(sheet: CaseSheet) -> List[dict]:
@@ -252,13 +391,16 @@ def compile_grid_items(sheet: CaseSheet) -> List[dict]:
 def compile_case(sheet: CaseSheet) -> dict:
     """Tous les champs d'exécution d'un cas, dérivés de la fiche."""
     grid = compile_grid_items(sheet)
+    has_patient = sheet.station.interlocutor == "patient"
     return {
         "title": sheet.station.title.strip(),
-        "station_type": sheet.station.station_type,
+        "station_type": station_type_for(sheet),
+        "domain": sheet.station.domain,
+        "interlocutor": sheet.station.interlocutor,
         "duration_seconds": max(60, int(sheet.station.duration_minutes * 60)),
-        "student_instructions": sheet.station.student_instructions.strip(),
+        "student_instructions": compile_instructions(sheet),
         "scenario_context": compile_scenario_context(sheet),
-        "patient_prompt": compile_patient_prompt(sheet),
+        "patient_prompt": compile_patient_prompt(sheet) if has_patient else None,
         "exam_findings": [
             {"id": e.id or _slug(e.label), "label": e.label.strip(), "findings": e.findings.strip()}
             for e in sheet.exam_findings if e.label.strip() and e.findings.strip()
@@ -267,6 +409,11 @@ def compile_case(sheet: CaseSheet) -> dict:
         "grid_items": grid,
         "total_points": sum(g["points"] for g in grid),
         "forbidden_terms": [t.strip() for t in sheet.never_says if t.strip()],
+        "scales": compile_scales(sheet),
+        "global_rating": sheet.correction.global_rating,
+        "attitude_weight": sheet.correction.attitude_weight,
+        "documents": [{"id": d.id, "label": d.label.strip(), "attachment_id": d.attachment_id}
+                      for d in sheet.station.documents if d.attachment_id],
     }
 
 
@@ -327,15 +474,26 @@ def check_sheet(sheet: CaseSheet) -> List[Issue]:
         add("erreur", "station.student_instructions", "Rédigez les consignes données à l'étudiant.")
     if not s.edn_items:
         add("attention", "station.edn_items", "Rattachez la station à au moins un item EDN (sert aussi à l'assistant).")
-    if p.age is None:
-        add("attention", "patient.age", "Indiquez l'âge du patient.")
-    if not (p.personality.strip() or p.emotional_state.strip()):
-        add("conseil", "patient.personality", "Décrivez le caractère ou l'état émotionnel du patient : son jeu sera plus naturel.")
+    has_patient = s.interlocutor == "patient"
+    interview = s.domain == "entretien_interrogatoire"
+    for i, d in enumerate(s.documents):
+        if not d.attachment_id:
+            add("attention", f"station.documents[{i}]", f"« {d.label or 'Document'} » : ajoutez le fichier.")
+    if not has_patient and not s.documents and s.domain in ("iconographie", "synthese_paraclinique"):
+        add("conseil", "station.documents", "Ajoutez les documents à interpréter (ECG, imagerie...).")
 
-    if not sheet.facts:
-        add("erreur", "facts", "Ajoutez les faits que connaît le patient.")
-    if not any(f.disclosure == "spontane" or f.category == "motif" for f in sheet.facts):
-        add("erreur", "facts", "Indiquez le motif de consultation (ce que le patient dit de lui-même).")
+    if has_patient:
+        if p.age is None:
+            add("attention", "patient.age", "Indiquez l'âge du patient.")
+        if not (p.personality.strip() or p.emotional_state.strip()):
+            add("conseil", "patient.personality", "Décrivez le caractère ou l'état émotionnel du patient : son jeu sera plus naturel.")
+        if not sheet.facts:
+            add("erreur", "facts", "Ajoutez les faits que connaît le patient.")
+        if not any(f.disclosure == "spontane" or f.category == "motif" for f in sheet.facts):
+            if interview:
+                add("erreur", "facts", "Indiquez le motif de consultation (ce que le patient dit de lui-même).")
+            elif sheet.facts:
+                add("conseil", "facts", "Indiquez ce que le patient dit en premier (phrase d'accroche), s'il en a une.")
 
     ids = [f.id for f in sheet.facts]
     if len(ids) != len(set(ids)):
@@ -355,10 +513,10 @@ def check_sheet(sheet: CaseSheet) -> List[Issue]:
             add("attention", where, f"Jargon dans la bouche du patient ({', '.join(jargon)}) : reformulez avec ses mots.")
 
     categories = {f.category for f in sheet.facts}
-    if "signe_negatif" not in categories:
+    if has_patient and interview and "signe_negatif" not in categories:
         add("conseil", "facts", "Ajoutez des signes négatifs (« pas de fièvre »...) : sans eux, le patient risque d'inventer.")
     for category, question in ANAMNESIS_CHECKLIST.items():
-        if category not in categories:
+        if has_patient and category not in categories:
             add("conseil", "facts", f"Le patient ne saura pas quoi répondre si on l'interroge sur {question}.")
 
     if not c.grid:
@@ -372,10 +530,19 @@ def check_sheet(sheet: CaseSheet) -> List[Issue]:
         missing = [fid for fid in g.fact_ids if sheet.fact(fid) is None]
         if missing:
             add("erreur", where, f"« {g.criterion} » renvoie à des faits supprimés.")
-        if not g.fact_ids and g.criterion.strip() and not _NO_FACT_NEEDED.search(_norm(g.criterion + " " + g.description)):
+        if interview and has_patient and not g.fact_ids and g.criterion.strip() \
+                and not _NO_FACT_NEEDED.search(_norm(g.criterion + " " + g.description)):
             add("attention", where, f"« {g.criterion} » n'est relié à aucun fait : l'étudiant peut-il l'obtenir en interrogeant le patient ?")
-    if not c.expected_diagnosis.strip():
+    if not c.expected_diagnosis.strip() and s.domain in ("entretien_interrogatoire", "strategie_diagnostique",
+                                                        "iconographie", "synthese_paraclinique"):
         add("attention", "correction.expected_diagnosis", "Indiquez le diagnostic attendu (pour l'évaluateur).")
+    for i, sc in enumerate(c.scales):
+        if sc.levels and len(sc.levels) != 5:
+            add("erreur", f"correction.scales[{i}]", f"« {sc.label or sc.id} » : il faut 5 niveaux (0 à 4), ou aucun.")
+        if not (sc.label.strip() or sc.id in STANDARD_SCALES):
+            add("erreur", f"correction.scales[{i}]", "Échelle sans intitulé.")
+    if not 0 <= c.attitude_weight <= 0.5:
+        add("erreur", "correction.attitude_weight", "La part des échelles d'attitude doit être comprise entre 0 et 50 %.")
 
     pending = sum(f.generated for f in sheet.facts) + sum(g.generated for g in c.grid) \
         + sum(e.generated for e in sheet.exam_findings) + sum(r.generated for r in p.reactions)

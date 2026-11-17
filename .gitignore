@@ -85,6 +85,9 @@ voice/volumes/
 # ============= Storage / Uploads =============
 # Fichiers uploadés par les utilisateurs
 backend_ecos_chatbot/app/storage/
+# Packs privés de stations (contenus protégés : jamais dans le dépôt)
+backend_ecos_chatbot/app/private/
+*.ecospack.zip
 backend_ecos_chatbot/data/uploads/
 backend_ecos_chatbot/sessions_logs/
 
