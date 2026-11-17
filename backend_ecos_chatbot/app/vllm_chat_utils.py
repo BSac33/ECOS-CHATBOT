@@ -59,7 +59,9 @@ class EvaluationOutput(BaseModel):
     evaluation: EvaluationResult
 
 
-# ==================== MODÈLES PYDANTIC POUR L'ARBITRAGE ====================
+# ==================== ANCIEN ARBITRE (NON UTILISÉ PAR LES ROUTES) ====================
+# Remplacé par arbiter.py (préfiltre, cache, sortie JSON compacte, client réutilisé).
+# Conservé uniquement pour comparaison : python scripts/arbiter_bench.py --legacy
 
 class ArbiterExam(BaseModel):
     requested: bool = Field(description="True si un examen est explicitement demandé")

@@ -103,6 +103,7 @@ alembic downgrade -1
 **AI Utilities:**
 - `ai_chat_utils.py` - Gemini API integration for patient simulation
 - `vllm_chat_utils.py` - vLLM integration with structured output (Pydantic schemas)
+- `arbiter.py` - Fast student-message arbiter: lexical prefilter (instant block), LRU verdict cache, minimal LLM call (`{"category","tone"}` JSON, fixed system prompt for vLLM prefix caching, reused client, `ARBITER_TIMEOUT` then fail-open). Benchmark: `scripts/arbiter_bench.py`
 - `patient_agent.py` - Patient agent with tool calling (examiner tools: `afficher_document`, `resultat_examen_clinique`, `signaler_hors_cadre`). Tool execution is pure; the route applies events only after the arbiter allows the message. See `docs/PATIENT_AGENT.md`
 - Uses **structured output** with Pydantic models to enforce JSON schema compliance
 
@@ -253,7 +254,7 @@ Located in `ai_chat_utils.py::build_patient_system_instruction()`. Key rules:
 - If no explicit question, only expresses emotion + short non-medical question
 
 ### Anti-Cheat Measures
-The arbiter LLM evaluates whether students attempt to extract scenario details, grading rubrics, or manipulate the simulation. See evaluation logic in `chat_routes.py` and evaluation prompts.
+The arbiter (`arbiter.py`) blocks `ABUSIVE` and `META_EXFILTRATION` messages (attempts to extract the grid, scenario, prompt, or to break the patient's role) and flags `OFF_TOPIC` / aggressive tone in `moderation_events`. Blocked messages never reach the transcript and the patient generation is cancelled.
 
 ### Error Handling
 - vLLM calls use exponential backoff retry (3 attempts)

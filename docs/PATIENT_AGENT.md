@@ -54,6 +54,43 @@ message étudiant
 Le temps avant le premier mot est donc max(arbitre, premier token du patient). Il n'y a
 **aucun** risque qu'un morceau de réponse parte avant la validation du message.
 
+## Arbitre (`arbiter.py`)
+
+Comme le texte du patient attend le verdict, l'arbitre fixe le délai avant le premier mot.
+Il prend donc toujours le chemin le plus rapide :
+
+| Étape | Coût | Rôle |
+|---|---|---|
+| 1. Préfiltre lexical | ≈ 0 ms | Insultes explicites et demandes flagrantes (grille, corrigé, prompt, « ignore tes instructions »). Message bloqué **sans appel LLM et sans lancer le patient**. Motifs à haute précision : « grille costale », « clinique », « dispute », « n'oubliez pas les consignes » passent. |
+| 2. Cache des verdicts | ≈ 0 ms | « Bonjour », « D'accord », « Merci »… reviennent d'un étudiant à l'autre (LRU, messages ≤ 200 caractères). |
+| 3. Appel LLM minimal | ~16 tokens générés | Sortie `{"category", "tone"}` uniquement, prompt système **fixe** (gardé par le cache de préfixe vLLM), `temperature=0`, client HTTP réutilisé. |
+| 4. Repli | ≤ `ARBITER_TIMEOUT` | Délai dépassé ou serveur indisponible : message **accepté** (le préfiltre a déjà écarté les cas flagrants), incident journalisé. |
+
+Catégories : `CLINICAL_QUESTION`, `EXAM_REQUEST`, `EMPATHY`, `CLOSING`, `META_BENIGN`,
+`META_EXFILTRATION`, `OFF_TOPIC`, `ABUSIVE`, `OTHER`.
+- **Bloquées** : `ABUSIVE`, `META_EXFILTRATION`.
+- **Signalées** (conservées dans le transcript) : `OFF_TOPIC`, ton `AGGRESSIVE` ou `INSULTING`.
+
+Gains mesurés avec le tokenizer de Qwen2.5, par rapport à l'ancien arbitre :
+
+| | Ancien | Nouveau |
+|---|---|---|
+| Tokens générés (JSON avec espaces) | 61 | 18 |
+| Tokens générés (JSON indenté) | 79 | 22 |
+| Prompt total | 998 | 613 |
+| Partie variable du prompt (hors cache de préfixe) | 38 | 9 |
+| Création d'un client HTTP par message | ~43 ms | 0 (réutilisé) |
+| Délai maximal en cas de panne | aucun (+ pauses de 1 s et 2 s) | `ARBITER_TIMEOUT` (2 s) |
+
+Pour mesurer la latence réelle et la justesse sur votre GPU, avec 34 messages annotés
+(questions intimes, dépistage suicidaire, insultes, tentatives de triche…) :
+
+```bash
+cd backend_ecos_chatbot/app
+python scripts/arbiter_bench.py --legacy                          # nouveau vs ancien
+python scripts/arbiter_bench.py --model Qwen/Qwen3-1.7B          # essayer un modèle plus petit
+```
+
 ## Flux SSE (`/chat/stream`)
 
 Réponse `text/event-stream`, un JSON par événement :
@@ -148,6 +185,9 @@ LLM_PROVIDER=vllm               # l'agent n'est utilisé qu'avec vLLM
 VLLM_MODEL=Qwen/Qwen3-8B        # mode "thinking" désactivé automatiquement pour Qwen3
 PATIENT_AGENT_ENABLED=true      # false = ancien comportement (pas d'outils, documents par mots-clés)
 PATIENT_AGENT_TIMEOUT=30        # secondes par appel LLM
+VLLM_ARBITER_BASE_URL=http://localhost:8002/v1
+VLLM_ARBITER_MODEL=Qwen/Qwen2.5-3B-Instruct
+ARBITER_TIMEOUT=2.0             # au-delà, le message est accepté par défaut
 ```
 
 vLLM doit être lancé avec `--enable-auto-tool-choice --tool-call-parser hermes`

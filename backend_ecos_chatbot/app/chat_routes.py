@@ -11,7 +11,8 @@ import json
 import os
 from models import Attachment, ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, ExaminerNoteOut, ModerationEvent, StationType, User
 from ai_chat_utils import generate_patient_reply
-from vllm_chat_utils import get_chat_completion_vllm, classify_student_message_vllm_arbiter, ArbiterOutput
+from vllm_chat_utils import get_chat_completion_vllm
+from arbiter import Verdict, arbitrate, prefilter
 from patient_agent import AgentEvent, CaseToolContext, DocumentRef, PatientAgentResult, StreamItem, stream_patient_agent
 from attachment_routes import find_matching_attachments
 from contextlib import aclosing, contextmanager, nullcontext
@@ -217,12 +218,7 @@ def get_time_remaining(
 EXAMINER_FINDING_PREFIX = "Examen clinique – "
 EXAMINER_DOCUMENT_PREFIX = "Document affiché – "
 
-# Tons/catégories de l'arbitre qui, sans bloquer le message, sont tracés
-FLAGGED_TONES = {"AGGRESSIVE", "INSULTING"}
-FLAGGED_CATEGORIES = {"OFF_TOPIC"}
-
 PATIENT_ERROR_MESSAGE = "Le patient simulé n'a pas pu répondre. Réessayez dans quelques secondes."
-ARBITER_ERROR_MESSAGE = "Erreur lors de l'arbitrage du message étudiant"
 
 
 def _use_patient_agent() -> bool:
@@ -232,18 +228,12 @@ def _use_patient_agent() -> bool:
     return provider == "vllm" and enabled
 
 
-def _blocked_notice(arbiter: dict) -> str:
-    cat = arbiter.get("category", "OTHER")
-    if cat == "ABUSIVE":
-        reason = "Votre message a été bloqué car il a été détecté comme inapproprié, insultant ou hors charte ECOS. Merci de rester respectueux dans vos échanges."
-    elif cat == "OFF_TOPIC":
-        reason = "Votre message a été jugé hors sujet pour cette station ECOS. Merci de rester dans le cadre de la simulation."
-    else:
-        reason = "Votre message n'a pas pu être accepté par le système. Si vous pensez que c'est une erreur, contactez l'administrateur."
-    redacted = (arbiter.get("safety") or {}).get("redacted_text")
-    if redacted:
-        reason += f"\nVersion modérée proposée : {redacted}"
-    return reason
+def _blocked_notice(verdict: Verdict) -> str:
+    if verdict.category == "ABUSIVE":
+        return "Votre message a été bloqué car il a été détecté comme inapproprié, insultant ou hors charte ECOS. Merci de rester respectueux dans vos échanges."
+    if verdict.category == "META_EXFILTRATION":
+        return "Votre message a été bloqué : il cherche à obtenir des informations sur la grille, le scénario ou le fonctionnement de la simulation. Restez dans le cadre de la consultation."
+    return "Votre message n'a pas pu être accepté par le système. Si vous pensez que c'est une erreur, contactez l'administrateur."
 
 
 def _station_state(rows: list[Message]) -> list[str]:
@@ -407,20 +397,20 @@ def _notes_for_event(event: AgentEvent) -> list[ExaminerNoteOut]:
     return []  # les signalements sont invisibles pour l'étudiant
 
 
-def _persist_blocked(session: Session, turn: _Turn, arbiter: dict) -> None:
+def _persist_blocked(session: Session, turn: _Turn, verdict: Verdict) -> None:
     session.add(ModerationEvent(
         attempt_id=turn.attempt_id,
         source="arbiter",
-        category=arbiter.get("category", "OTHER"),
-        severity=arbiter.get("tone", "NEUTRAL"),
+        category=verdict.category,
+        severity=verdict.tone,
         action="blocked",
-        detail=(arbiter.get("safety") or {}).get("redacted_text"),
+        detail=verdict.detail,
         student_message=turn.message,
     ))
     session.commit()
 
 
-def _persist_exchange(session: Session, turn: _Turn, result: PatientAgentResult, arbiter: dict) -> ChatOut:
+def _persist_exchange(session: Session, turn: _Turn, result: PatientAgentResult, verdict: Verdict) -> ChatOut:
     """Étudiant -> patient -> notes de l'examinateur (dans l'ordre des outils) -> signalements."""
     t0 = datetime.now()
     tick = iter(range(1, 1000))
@@ -455,16 +445,15 @@ def _persist_exchange(session: Session, turn: _Turn, result: PatientAgentResult,
         examiner_notes.extend(_notes_for_event(event))
 
     # Signalements : arbitre (ton agressif, hors sujet accepté) + patient (outil)
-    category = arbiter.get("category", "OTHER")
-    tone = arbiter.get("tone", "NEUTRAL")
-    if tone in FLAGGED_TONES or category in FLAGGED_CATEGORIES:
+    if verdict.flagged:
         session.add(ModerationEvent(
             attempt_id=turn.attempt_id,
             message_id=student_msg.id,
             source="arbiter",
-            category=category,
-            severity=tone,
+            category=verdict.category,
+            severity=verdict.tone,
             action="flagged",
+            detail=verdict.detail,
         ))
     for flag in result.flags:
         session.add(ModerationEvent(
@@ -491,8 +480,18 @@ async def _run_turn(turn: _Turn, write_session: Callable[[], ContextManager[Sess
         ("delta", str)                      texte du patient (seulement après validation)
         ("examiner_note", ExaminerNoteOut)  résultat d'outil visible par l'étudiant
         ("done", ChatOut)                   fin du tour, après persistance (bloqué ou non)
-      ou ("error", (status_http, message))  rien n'est enregistré
+      ou ("error", (status_http, message))  échec du patient : rien n'est enregistré
     """
+    # Cas flagrant (insulte explicite, demande de grille...) : verdict immédiat,
+    # sans appel LLM et sans même lancer la génération du patient.
+    verdict = prefilter(turn.message)
+    if verdict is not None:
+        with write_session() as s:
+            _persist_blocked(s, turn, verdict)
+        logger.info("⛔ Message bloqué par le préfiltre (%s) : %s", verdict.category, verdict.detail)
+        yield ("done", ChatOut(patient_reply=_blocked_notice(verdict), blocked=True))
+        return
+
     buffer: asyncio.Queue = asyncio.Queue()
 
     async def pump() -> None:
@@ -507,33 +506,19 @@ async def _run_turn(turn: _Turn, write_session: Callable[[], ContextManager[Sess
 
     patient_task = asyncio.create_task(pump())
     try:
-        try:
-            arbiter = await asyncio.to_thread(
-                classify_student_message_vllm_arbiter,
-                [d.display_name for d in turn.ctx.documents],
-                turn.message,
-            )
-        except Exception:
-            logger.exception("❌ Échec de l'arbitrage")
-            arbiter = None
-        if not arbiter:
-            yield ("error", (500, ARBITER_ERROR_MESSAGE))
-            return
-
-        category = arbiter.get("category", "OTHER")
+        # Ne lève jamais : en cas d'indisponibilité, le message est accepté (source="fallback")
+        verdict = await arbitrate(turn.message)
+        logger.info("🧭 Arbitre : %s/%s via %s en %.0f ms",
+                    verdict.category, verdict.tone, verdict.source, verdict.latency_ms)
 
         # Message refusé : génération annulée, rien dans le transcript, incident tracé
-        if not (arbiter.get("safety") or {}).get("allow_to_transcript", True):
+        if not verdict.allowed:
             patient_task.cancel()
             await asyncio.wait([patient_task])
             with write_session() as s:
-                _persist_blocked(s, turn, arbiter)
-            logger.info("⛔ Message bloqué par l'arbitre (%s/%s)", category, arbiter.get("tone"))
-            yield ("done", ChatOut(patient_reply=_blocked_notice(arbiter), blocked=True))
+                _persist_blocked(s, turn, verdict)
+            yield ("done", ChatOut(patient_reply=_blocked_notice(verdict), blocked=True))
             return
-
-        if category == "EXAM_REQUEST":
-            logger.info("L'étudiant a demandé un examen complémentaire : %s", arbiter.get("exam"))
 
         # Message validé : on vide le tampon puis on relaie au fil de l'eau
         while True:
@@ -549,7 +534,7 @@ async def _run_turn(turn: _Turn, write_session: Callable[[], ContextManager[Sess
             elif kind == "done":
                 logger.info("Réponse patient générée: %s (outils: %s)", value.reply, value.tool_calls)
                 with write_session() as s:
-                    out = _persist_exchange(s, turn, value, arbiter)
+                    out = _persist_exchange(s, turn, value, verdict)
                 yield ("done", out)
                 return
     finally:
