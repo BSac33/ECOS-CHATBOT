@@ -301,6 +301,16 @@ class ClinicalCase(SQLModel, table=True):
     # Fiche de cas structurée en cours d'édition (case_sheet.CaseSheet). Les champs
     # d'exécution ci-dessus en sont compilés à chaque publication (voir case_versions).
     sheet: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
+
+    # Relecture par un pair : facultative, ne bloque pas la publication.
+    # None = pas de relecture demandée ; "a_relire" = demandée ; "relue" = faite.
+    review_status: Optional[str] = Field(default=None, index=True)
+    review_requested_at: Optional[datetime] = None
+    reviewed_by: Optional[int] = Field(default=None, foreign_key="users.id")
+    reviewed_at: Optional[datetime] = None
+    review_note: Optional[str] = None
+    # Empreinte de la fiche relue : signale les modifications faites depuis la relecture
+    reviewed_sheet_hash: Optional[str] = None
     
     duration_seconds: int
     

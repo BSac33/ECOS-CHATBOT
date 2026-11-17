@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // Atelier : les stations de l'enseignant
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import Button from 'primevue/button'
 import InputText from 'primevue/inputtext'
@@ -13,6 +13,8 @@ const cases = ref<CaseSummary[] | null>(null)
 const error = ref('')
 const newTitle = ref('')
 const creating = ref(false)
+const mine = computed(() => (cases.value || []).filter((c) => c.owned))
+const toReview = computed(() => (cases.value || []).filter((c) => !c.owned))
 
 onMounted(async () => {
   try {
@@ -50,20 +52,40 @@ async function create() {
 
     <Message v-if="error" severity="error" :closable="false">{{ error }}</Message>
 
-    <p v-if="cases && !cases.length" class="muted">Aucune station pour l'instant.</p>
-    <ul v-if="cases?.length" class="cases">
-      <li v-for="c in cases" :key="c.id">
+    <h2>Mes stations</h2>
+    <p v-if="cases && !mine.length" class="muted">Aucune station pour l'instant.</p>
+    <ul v-if="mine.length" class="cases">
+      <li v-for="c in mine" :key="c.id">
         <RouterLink :to="{ name: 'case-editor', params: { caseId: c.id } }" class="case-row">
           <span class="case-title">{{ c.title }}</span>
           <span class="case-meta">
             <Tag :value="c.status === 'published' ? `Publiée · v${c.latest_version}` : 'Brouillon'"
                  :severity="c.status === 'published' ? 'success' : 'secondary'" />
+            <Tag v-if="c.review_status === 'a_relire'" value="À relire" severity="warn" icon="pi pi-eye" />
+            <Tag v-else-if="c.review_status === 'relue'" value="Relue" severity="success" icon="pi pi-check" />
             <Tag v-if="c.errors" :value="`${c.errors} erreur${c.errors > 1 ? 's' : ''}`" severity="danger" />
             <Tag v-else-if="c.warnings" :value="`${c.warnings} à vérifier`" severity="warn" />
           </span>
         </RouterLink>
       </li>
     </ul>
+
+    <template v-if="toReview.length">
+      <h2>À relire pour mes collègues</h2>
+      <p class="muted">Relecture facultative : ces stations peuvent déjà être publiées.</p>
+      <ul class="cases">
+        <li v-for="c in toReview" :key="c.id">
+          <RouterLink :to="{ name: 'case-editor', params: { caseId: c.id } }" class="case-row">
+            <span class="case-title">{{ c.title }} <span class="author">· {{ c.author }}</span></span>
+            <span class="case-meta">
+              <Tag :value="c.status === 'published' ? `Publiée · v${c.latest_version}` : 'Brouillon'"
+                   :severity="c.status === 'published' ? 'success' : 'secondary'" />
+              <Tag value="À relire" severity="warn" icon="pi pi-eye" />
+            </span>
+          </RouterLink>
+        </li>
+      </ul>
+    </template>
   </div>
 </template>
 
@@ -80,4 +102,6 @@ h1 { font-size: 1.75rem; margin: 0.5rem 0; }
 .case-row:hover { background: #f8fafc; color: #1e293b; }
 .case-meta { display: flex; gap: 0.4rem; }
 .muted { color: #64748b; }
+h2 { font-size: 1.15rem; margin: 1.5rem 0 0.6rem; }
+.author { color: #64748b; font-weight: 400; }
 </style>

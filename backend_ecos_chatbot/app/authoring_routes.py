@@ -6,12 +6,19 @@ L'enseignant édite une fiche de cas structurée (case_sheet.CaseSheet). Le prom
 patient, le contexte de l'évaluateur et la grille en sont compilés. Chaque
 publication crée une version figée : une tentative garde la version qu'elle a jouée.
 
+Relecture par un pair : facultative. L'auteur peut mettre sa station « à relire » ; les
+autres enseignants la voient alors dans leur liste, peuvent la lire, tester le patient et la
+marquer comme relue (avec une remarque). Elle reste publiable à tout moment, relue ou non.
+
   GET    /authoring/cases                    mes cas (tous pour un administrateur)
   POST   /authoring/cases                    nouveau brouillon
   GET    /authoring/cases/{id}               fiche + aperçu compilé + vérifications + versions
   PUT    /authoring/cases/{id}/sheet         enregistrer la fiche
   POST   /authoring/cases/{id}/publish       publier (refusé s'il reste des erreurs)
-  POST   /authoring/cases/{id}/test          tentative de test du brouillon (enseignant)
+  POST   /authoring/cases/{id}/test          tentative de test du brouillon (auteur ou relecteur)
+  POST   /authoring/cases/{id}/review/request demander une relecture (statut « à relire »)
+  DELETE /authoring/cases/{id}/review         retirer le statut de relecture
+  POST   /authoring/cases/{id}/review         marquer comme relue (autre enseignant ou administrateur)
   GET    /authoring/reference/items          items EDN connus
   GET    /authoring/reference/situations     situations de départ (celles des items en premier)
   POST   /authoring/cases/{id}/assist        propositions de l'assistant (« Générer »)
@@ -20,12 +27,15 @@ publication crée une version figée : une tentative garde la version qu'elle a 
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime, timedelta
 from typing import List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlmodel import Session, select
 
 import authoring_assistant
@@ -52,6 +62,22 @@ class CaseSummary(BaseModel):
     latest_version: Optional[int] = None
     errors: int
     warnings: int
+    owned: bool                        # False : station d'un collègue, à relire
+    author: str
+    review_status: Optional[str] = None
+
+
+class ReviewOut(BaseModel):
+    status: Optional[str] = None       # None | "a_relire" | "relue"
+    requested_at: Optional[str] = None
+    reviewer: Optional[str] = None
+    reviewed_at: Optional[str] = None
+    note: Optional[str] = None
+    changed_since_review: bool = False
+
+
+class ReviewIn(BaseModel):
+    note: str = ""
 
 
 class VersionOut(BaseModel):
@@ -77,6 +103,10 @@ class CaseDetail(BaseModel):
     preview: Optional[CompiledPreview]
     issues: List[Issue]
     versions: List[VersionOut]
+    can_edit: bool                     # auteur ou administrateur ; sinon lecture (relecteur)
+    can_review: bool
+    author: str
+    review: ReviewOut
 
 
 class CreateCaseIn(BaseModel):
@@ -95,13 +125,57 @@ class TestAttemptOut(BaseModel):
 
 # ==================== OUTILS ====================
 
+def _can_edit(case: ClinicalCase, user: User) -> bool:
+    return case.created_by == user.id or user.role == UserRole.admin
+
+
+def _can_read(case: ClinicalCase, user: User) -> bool:
+    return _can_edit(case, user) or case.review_status == "a_relire" or case.reviewed_by == user.id
+
+
+def _can_review(case: ClinicalCase, user: User) -> bool:
+    """Relecture par un pair : pas par l'auteur (sauf administrateur)."""
+    return case.review_status == "a_relire" and (case.created_by != user.id or user.role == UserRole.admin)
+
+
 def _own_case(session: Session, case_id: int, user: User) -> ClinicalCase:
     case = session.get(ClinicalCase, case_id)
     if not case:
         raise HTTPException(404, "Cas introuvable")
-    if case.created_by != user.id and user.role != UserRole.admin:
+    if not _can_edit(case, user):
         raise HTTPException(403, "Ce cas appartient à un autre enseignant")
     return case
+
+
+def _readable_case(session: Session, case_id: int, user: User) -> ClinicalCase:
+    case = session.get(ClinicalCase, case_id)
+    if not case:
+        raise HTTPException(404, "Cas introuvable")
+    if not _can_read(case, user):
+        raise HTTPException(403, "Ce cas appartient à un autre enseignant")
+    return case
+
+
+def _sheet_hash(sheet: Optional[dict]) -> Optional[str]:
+    if sheet is None:
+        return None
+    return hashlib.sha256(json.dumps(sheet, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
+
+
+def _name(session: Session, user_id: Optional[int]) -> Optional[str]:
+    u = session.get(User, user_id) if user_id else None
+    return (u.full_name or u.username) if u else None
+
+
+def _review(session: Session, case: ClinicalCase) -> ReviewOut:
+    return ReviewOut(
+        status=case.review_status,
+        requested_at=case.review_requested_at.isoformat() if case.review_requested_at else None,
+        reviewer=_name(session, case.reviewed_by),
+        reviewed_at=case.reviewed_at.isoformat() if case.reviewed_at else None,
+        note=case.review_note,
+        changed_since_review=case.review_status == "relue" and _sheet_hash(case.sheet) != case.reviewed_sheet_hash,
+    )
 
 
 def _version_out(v: CaseVersion) -> VersionOut:
@@ -119,13 +193,15 @@ def _preview(sheet: CaseSheet) -> CompiledPreview:
                            total_points=c["total_points"])
 
 
-def _detail(session: Session, case: ClinicalCase) -> CaseDetail:
+def _detail(session: Session, case: ClinicalCase, user: User) -> CaseDetail:
     sheet = _sheet(case)
     return CaseDetail(
         id=case.id, status=case.status, sheet=sheet, legacy=sheet is None,
         preview=_preview(sheet) if sheet else None,
         issues=check_sheet(sheet) if sheet else [],
         versions=[_version_out(v) for v in case_publishing.versions(session, case.id)],
+        can_edit=_can_edit(case, user), can_review=_can_review(case, user),
+        author=_name(session, case.created_by) or "", review=_review(session, case),
     )
 
 
@@ -135,7 +211,8 @@ def _detail(session: Session, case: ClinicalCase) -> CaseDetail:
 def list_cases(session: Session = Depends(get_session), user: User = Depends(teacher)):
     stmt = select(ClinicalCase)
     if user.role != UserRole.admin:
-        stmt = stmt.where(ClinicalCase.created_by == user.id)
+        # Mes stations + celles des collègues qui demandent une relecture
+        stmt = stmt.where(or_(ClinicalCase.created_by == user.id, ClinicalCase.review_status == "a_relire"))
     out = []
     for case in session.exec(stmt.order_by(ClinicalCase.id.desc())).all():
         sheet = _sheet(case)
@@ -146,6 +223,8 @@ def list_cases(session: Session = Depends(get_session), user: User = Depends(tea
             status=case.status, latest_version=max(published, default=None),
             errors=sum(i.level == "erreur" for i in issues),
             warnings=sum(i.level == "attention" for i in issues),
+            owned=_can_edit(case, user), author=_name(session, case.created_by) or "",
+            review_status=case.review_status,
         ))
     return out
 
@@ -164,12 +243,12 @@ def create_case(payload: CreateCaseIn, session: Session = Depends(get_session), 
     session.add(case)
     session.commit()
     session.refresh(case)
-    return _detail(session, case)
+    return _detail(session, case, user)
 
 
 @router.get("/cases/{case_id}", response_model=CaseDetail)
 def get_case(case_id: int, session: Session = Depends(get_session), user: User = Depends(teacher)):
-    return _detail(session, _own_case(session, case_id, user))
+    return _detail(session, _readable_case(session, case_id, user), user)
 
 
 @router.put("/cases/{case_id}/sheet", response_model=CaseDetail)
@@ -179,7 +258,7 @@ def save_sheet(case_id: int, sheet: CaseSheet, session: Session = Depends(get_se
     session.add(case)
     session.commit()
     session.refresh(case)
-    return _detail(session, case)
+    return _detail(session, case, user)
 
 
 @router.post("/cases/{case_id}/publish", response_model=PublishOut)
@@ -205,8 +284,9 @@ def publish(case_id: int, session: Session = Depends(get_session), user: User = 
 
 @router.post("/cases/{case_id}/test", response_model=TestAttemptOut)
 def test_draft(case_id: int, session: Session = Depends(get_session), user: User = Depends(teacher)):
-    """Joue le brouillon tel quel (même avec des avertissements) dans une tentative de test."""
-    case = _own_case(session, case_id, user)
+    """Joue le brouillon tel quel (même avec des avertissements) dans une tentative de test.
+    Ouvert à l'auteur et aux relecteurs."""
+    case = _readable_case(session, case_id, user)
     sheet = _sheet(case)
     if sheet is None:
         raise HTTPException(400, "Ce cas n'a pas de fiche.")
@@ -293,3 +373,46 @@ async def assist(case_id: int, payload: AssistIn, session: Session = Depends(get
         raise HTTPException(422, str(exc))
     except authoring_assistant.AssistantError as exc:
         raise HTTPException(502, str(exc))
+
+
+# ==================== RELECTURE (facultative, ne bloque pas la publication) ====================
+
+@router.post("/cases/{case_id}/review/request", response_model=CaseDetail)
+def request_review(case_id: int, session: Session = Depends(get_session), user: User = Depends(teacher)):
+    case = _own_case(session, case_id, user)
+    case.review_status = "a_relire"
+    case.review_requested_at = datetime.now()
+    case.reviewed_by = case.reviewed_at = case.review_note = case.reviewed_sheet_hash = None
+    session.add(case)
+    session.commit()
+    session.refresh(case)
+    return _detail(session, case, user)
+
+
+@router.delete("/cases/{case_id}/review", response_model=CaseDetail)
+def clear_review(case_id: int, session: Session = Depends(get_session), user: User = Depends(teacher)):
+    case = _own_case(session, case_id, user)
+    case.review_status = case.review_requested_at = None
+    case.reviewed_by = case.reviewed_at = case.review_note = case.reviewed_sheet_hash = None
+    session.add(case)
+    session.commit()
+    session.refresh(case)
+    return _detail(session, case, user)
+
+
+@router.post("/cases/{case_id}/review", response_model=CaseDetail)
+def mark_reviewed(case_id: int, payload: ReviewIn, session: Session = Depends(get_session), user: User = Depends(teacher)):
+    case = _readable_case(session, case_id, user)
+    if case.review_status != "a_relire":
+        raise HTTPException(409, "Aucune relecture n'est demandée pour cette station.")
+    if not _can_review(case, user):
+        raise HTTPException(403, "La relecture doit être faite par un autre enseignant.")
+    case.review_status = "relue"
+    case.reviewed_by = user.id
+    case.reviewed_at = datetime.now()
+    case.review_note = payload.note.strip() or None
+    case.reviewed_sheet_hash = _sheet_hash(case.sheet)
+    session.add(case)
+    session.commit()
+    session.refresh(case)
+    return _detail(session, case, user)

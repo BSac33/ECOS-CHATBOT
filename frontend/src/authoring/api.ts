@@ -89,9 +89,24 @@ export interface Issue { level: IssueLevel; field: string; message: string }
 
 export interface VersionOut { id: number; version: number; status: 'published' | 'test'; created_at: string }
 
+export type ReviewStatus = 'a_relire' | 'relue' | null
+
+export interface ReviewInfo {
+  status: ReviewStatus
+  requested_at: string | null
+  reviewer: string | null
+  reviewed_at: string | null
+  note: string | null
+  changed_since_review: boolean
+}
+
 export interface CaseDetail {
   id: number
   status: string
+  can_edit: boolean          // auteur ou administrateur ; sinon lecture seule (relecteur)
+  can_review: boolean
+  author: string
+  review: ReviewInfo
   sheet: CaseSheet | null
   legacy: boolean
   preview: {
@@ -112,6 +127,9 @@ export interface CaseSummary {
   latest_version: number | null
   errors: number
   warnings: number
+  owned: boolean
+  author: string
+  review_status: ReviewStatus
 }
 
 export type AssistTask = 'interrogatoire' | 'negatifs' | 'langage' | 'personnage' | 'grille' | 'examen'
@@ -181,6 +199,10 @@ export const authoringApi = {
     call<CaseDetail>(`/cases/${id}/sheet`, { method: 'PUT', body: JSON.stringify(sheet) }),
   publish: (id: number) =>
     call<{ version: VersionOut; issues: Issue[] }>(`/cases/${id}/publish`, { method: 'POST' }),
+  requestReview: (id: number) => call<CaseDetail>(`/cases/${id}/review/request`, { method: 'POST' }),
+  clearReview: (id: number) => call<CaseDetail>(`/cases/${id}/review`, { method: 'DELETE' }),
+  markReviewed: (id: number, note: string) =>
+    call<CaseDetail>(`/cases/${id}/review`, { method: 'POST', body: JSON.stringify({ note }) }),
   test: (id: number) => call<{ attempt_id: string; version_id: number }>(`/cases/${id}/test`, { method: 'POST' }),
   assist: (id: number, task: AssistTask, sheet: CaseSheet, instructions = '') =>
     call<Proposal>(`/cases/${id}/assist`, { method: 'POST', body: JSON.stringify({ task, sheet, instructions }) }),

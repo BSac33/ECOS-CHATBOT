@@ -276,3 +276,65 @@ async def test_corpus_routes(client, session):
 
     client.as_user("etu")
     assert (await client.get("/authoring/corpus/search", params={"q": "x"})).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_peer_review_is_optional(client, session):
+    """Statut « à relire » : visible des collègues, relu par un autre enseignant, jamais bloquant."""
+    sheet = dupont_sheet()
+    case_id = await _new_case(client, sheet)
+    detail = (await client.get(f"/authoring/cases/{case_id}")).json()
+    assert detail["review"]["status"] is None and detail["can_edit"] and not detail["can_review"]
+
+    # Publiable sans aucune relecture
+    assert (await client.post(f"/authoring/cases/{case_id}/publish")).status_code == 200
+
+    # Demande de relecture : réservée à l'auteur ; ne bloque pas une nouvelle publication
+    client.as_user("autre_prof")
+    assert (await client.post(f"/authoring/cases/{case_id}/review/request")).status_code == 403
+    client.as_user("prof")
+    r = await client.post(f"/authoring/cases/{case_id}/review/request")
+    assert r.json()["review"]["status"] == "a_relire"
+    assert (await client.post(f"/authoring/cases/{case_id}/publish")).status_code == 200
+    # L'auteur ne se relit pas lui-même
+    assert (await client.post(f"/authoring/cases/{case_id}/review", json={"note": "ok"})).status_code == 403
+
+    # Un collègue la voit, la lit, la teste, mais ne la modifie pas
+    client.as_user("autre_prof")
+    listed = (await client.get("/authoring/cases")).json()
+    assert [(c["id"], c["owned"], c["review_status"], c["author"]) for c in listed] == [(case_id, False, "a_relire", "prof")]
+    detail = (await client.get(f"/authoring/cases/{case_id}")).json()
+    assert not detail["can_edit"] and detail["can_review"]
+    assert (await client.put(f"/authoring/cases/{case_id}/sheet", json=sheet.model_dump(mode="json"))).status_code == 403
+    assert (await client.post(f"/authoring/cases/{case_id}/publish")).status_code == 403
+    assert (await client.post(f"/authoring/cases/{case_id}/test")).status_code == 200
+
+    r = await client.post(f"/authoring/cases/{case_id}/review", json={"note": "Ajouter la question sur le diabète."})
+    review = r.json()["review"]
+    assert review["status"] == "relue" and review["reviewer"] == "autre"
+    assert review["note"] == "Ajouter la question sur le diabète." and not review["changed_since_review"]
+    assert (await client.post(f"/authoring/cases/{case_id}/review", json={})).status_code == 409
+    # Le relecteur garde l'accès en lecture ; les autres collègues ne la voient plus
+    assert (await client.get(f"/authoring/cases/{case_id}")).status_code == 200
+
+    # L'auteur modifie après relecture : signalé
+    client.as_user("prof")
+    sheet.patient.age = 59
+    r = await client.put(f"/authoring/cases/{case_id}/sheet", json=sheet.model_dump(mode="json"))
+    assert r.json()["review"]["changed_since_review"] is True
+
+    # Retirer le statut
+    r = await client.delete(f"/authoring/cases/{case_id}/review")
+    assert r.json()["review"] == {"status": None, "requested_at": None, "reviewer": None, "reviewed_at": None,
+                                  "note": None, "changed_since_review": False}
+    client.as_user("autre_prof")
+    assert (await client.get(f"/authoring/cases/{case_id}")).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_admin_can_review_own_case(client):
+    client.as_user("admin")
+    case_id = await _new_case(client, dupont_sheet())
+    await client.post(f"/authoring/cases/{case_id}/review/request")
+    r = await client.post(f"/authoring/cases/{case_id}/review", json={"note": ""})
+    assert r.status_code == 200 and r.json()["review"]["status"] == "relue" and r.json()["review"]["note"] is None

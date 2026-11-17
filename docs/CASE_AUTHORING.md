@@ -21,6 +21,25 @@ Accès : menu ▸ *Atelier de stations* (`/atelier`), rôles `teacher` et `admin
 6. **Publier** (refusé tant qu'il reste des erreurs) : crée une **version figée**. Les étudiants
    jouent toujours la dernière version publiée ; une tentative commencée garde la version avec
    laquelle elle a été jouée, y compris pour sa correction.
+7. **Relecture par un collègue (facultative)** : voir ci-dessous. Une station se publie avec ou
+   sans relecture.
+
+## Relecture par un collègue
+
+Statut porté par la station (`clinical_cases.review_status`), indépendant de la publication :
+
+| Statut | Signification | Qui |
+|---|---|---|
+| *(aucun)* | pas de relecture demandée | — |
+| **À relire** (`a_relire`) | l'auteur demande une relecture ; la station apparaît dans la liste « À relire pour mes collègues » de tous les enseignants | l'auteur (ou un administrateur) la demande ou la retire |
+| **Relue** (`relue`) | un collègue l'a relue, avec une remarque facultative pour l'auteur | un autre enseignant que l'auteur, ou un administrateur |
+
+- Le relecteur ouvre la station **en lecture seule**, peut **tester le patient**, puis laisse sa
+  remarque et la marque comme relue (panneau *Vérifications*). Il ne peut ni la modifier ni la publier.
+- Si l'auteur modifie la fiche après la relecture, la station affiche *Relue · modifiée depuis*
+  (empreinte de la fiche relue, `reviewed_sheet_hash`) ; il peut demander une nouvelle relecture.
+- **La publication n'est jamais bloquée** : une station à relire, relue ou jamais relue se publie
+  de la même façon. Le statut n'est pas montré aux étudiants.
 
 ## La fiche de cas (`case_sheet.py`)
 
@@ -86,16 +105,18 @@ contenant un mot interdit écartées, doublons écartés, faits inconnus retiré
 non fournies retirées, jargon signalé. Les éléments écartés sont listés sous la proposition. Une
 *précision facultative* (ex. « patiente plus âgée, très anxieuse ») peut orienter l'assistant.
 
-Configuration (`fastapi.env`) : tout serveur compatible OpenAI.
+Configuration (`fastapi.env`) : un serveur **vLLM** (par défaut celui du patient, Qwen3-8B).
+L'intégration Gemini de la codebase est historique et n'est pas utilisée par l'atelier.
 
 ```bash
 AUTHORING_BASE_URL=   # vide = VLLM_BASE_URL (serveur du patient)
 AUTHORING_MODEL=      # vide = VLLM_MODEL
 AUTHORING_API_KEY=    # vide = VLLM_API_KEY
 AUTHORING_TIMEOUT=120
-# Gemini par son point d'accès compatible OpenAI :
-# AUTHORING_BASE_URL=https://generativelanguage.googleapis.com/v1beta/openai/
 ```
+
+Un serveur vLLM distinct (modèle plus gros pour la rédaction, hors des heures d'examen) se
+configure avec ces mêmes variables.
 
 ## Référentiel officiel (`corpus.py`)
 
@@ -150,14 +171,18 @@ Ajouter une autre spécialité : écrire son analyseur (même sortie `ParsedChap
 | GET | `/cases/{id}` | fiche, aperçu compilé, vérifications, versions |
 | PUT | `/cases/{id}/sheet` | enregistrer la fiche (renvoie vérifications et aperçu) |
 | POST | `/cases/{id}/publish` | publier ; 422 avec `{message, issues}` s'il reste des erreurs ; 409 si le titre est pris |
-| POST | `/cases/{id}/test` | tentative de test du brouillon → `{attempt_id, version_id}` |
+| POST | `/cases/{id}/test` | tentative de test du brouillon → `{attempt_id, version_id}` (auteur ou relecteur) |
+| POST | `/cases/{id}/review/request` | demander une relecture (auteur) |
+| DELETE | `/cases/{id}/review` | retirer le statut de relecture (auteur) |
+| POST | `/cases/{id}/review` | `{note}` : marquer comme relue (autre enseignant ou administrateur) |
 | POST | `/cases/{id}/assist` | `{task, instructions?, sheet?}` → propositions (la fiche n'est pas modifiée) |
 | GET | `/reference/items` | items EDN connus |
 | GET | `/reference/situations?items=339,230` | situations de départ, celles des items d'abord |
 | GET | `/corpus/search?q=&items=&kinds=` | extraits du référentiel |
 | GET | `/corpus/objectives?items=` | objectifs hiérarchisés (rang A d'abord) |
 
-Un enseignant ne voit et ne modifie que ses stations ; un administrateur les voit toutes.
+Un enseignant modifie ses stations et lit celles de ses collègues qui demandent une relecture
+(ainsi que celles qu'il a relues) ; un administrateur voit et modifie tout.
 
 ## Frontend (`frontend/src/authoring/`)
 
@@ -169,6 +194,5 @@ test, publication), `FactsEditor.vue`, `GridEditor.vue`, `AssistantPanel.vue`, `
 
 - Les consignes de l'assistant n'ont été vérifiées qu'avec un faux serveur LLM : à valider sur le
   modèle réel (qualité des propositions, respect du schéma JSON).
-- Pas encore de relecture par un pair avant publication : un enseignant publie seul.
 - Les cas créés avant l'atelier n'ont pas de fiche ; pas de conversion automatique.
 - Seule la cardiologie est importée.

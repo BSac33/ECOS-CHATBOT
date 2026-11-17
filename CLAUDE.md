@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Tech Stack
 - **Backend**: FastAPI + SQLAlchemy/SQLModel + PostgreSQL
 - **Frontend**: Vue 3 + TypeScript + Vite + PrimeVue
-- **AI**: Google Gemini API (default) + vLLM (optional) with structured output
+- **AI**: vLLM (Qwen) with structured output; the Google Gemini path (`ai_chat_utils.py`) is legacy, do not use it for new features
 - **Deployment**: Docker Compose
 - **CLI**: Typer-based Python CLI for testing
 
@@ -102,12 +102,12 @@ alembic downgrade -1
 - `admin_routes.py` - Case and evaluation grid management (admin only)
 - `attachment_routes.py` - File upload/download for case resources
 - `evaluation_routes.py` - Post-exam evaluation with LLM
-- `authoring_routes.py` - Case authoring workshop for teachers (`/authoring`): drafts, compiled preview, checks, versioned publish, teacher test attempts, assistant, reference search. See `docs/CASE_AUTHORING.md`
+- `authoring_routes.py` - Case authoring workshop for teachers (`/authoring`): drafts, compiled preview, checks, versioned publish, teacher test attempts, assistant, reference search, optional peer review (`review_status` a_relire/relue, never blocks publication; reviewers get read-only access and can test). See `docs/CASE_AUTHORING.md`
 
 **Case Authoring:**
 - `case_sheet.py` - Structured case sheet (facts, not prompts: patient words, spontaneous vs on-question disclosure, pertinent negatives, never-says terms, grid linked to facts) compiled into patient prompt / evaluator context / grid / exam findings; `check_sheet` role-maintenance checks (erreur blocks publication)
 - `case_publishing.py` - `publish()` freezes a `CaseVersion` and updates the case runtime fields, grid and EDN links; `snapshot(..., "test")` for teacher test attempts
-- `authoring_assistant.py` - "Générer" actions (interview, negatives, lay wording, persona, grid, exam) grounded on the official corpus, structured output, deterministic filtering; proposals marked `generated=True` until the teacher validates them. Any OpenAI-compatible server (`AUTHORING_*`, defaults to `VLLM_*`)
+- `authoring_assistant.py` - "Générer" actions (interview, negatives, lay wording, persona, grid, exam) grounded on the official corpus, structured output, deterministic filtering; proposals marked `generated=True` until the teacher validates them. vLLM server (`AUTHORING_*`, defaults to `VLLM_*`)
 - `corpus.py` - Official 2nd-cycle reference: SFC/CNEC chapter parser (R2C item, starting situations, ranked objectives, ranked excerpts), idempotent `store_chapter`, BM25 `search_corpus`. Import: `scripts/ingest_corpus.py`. Texts live in the DB only, never in the repo (agreement of the cardiology college and UNESS; tests use a fictitious chapter)
 - `case_examples.py` - Dupont case as a structured sheet (used by the seed and tests)
 
@@ -351,7 +351,7 @@ Set `LLM_PROVIDER=vllm` in `fastapi.env` and configure vLLM endpoint. The code a
 
 **Core Tables:**
 - `users` - Student/teacher/admin accounts
-- `clinical_cases` - ECOS station definitions (`sheet`: structured case sheet being edited; runtime fields = latest published version)
+- `clinical_cases` - ECOS station definitions (`sheet`: structured case sheet being edited; runtime fields = latest published version; `review_status` + `reviewed_*`: optional peer review)
 - `case_versions` - Frozen compiled versions (`published` | `test`); `attempts.case_version_id` = version played
 - `attempts` - Student attempt sessions (`case_version_id`: version played; `is_test`: teacher test, excluded from stats)
 - `chat_messages` - Conversation transcripts (roles: system, student, patient, examiner; `modality` text|voice; `interrupted_by` + `spoken_content` when the student cut the patient off)

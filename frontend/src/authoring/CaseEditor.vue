@@ -75,7 +75,7 @@ async function save(): Promise<boolean> {
 }
 
 watch(sheet, () => {
-  if (applyingServer) return
+  if (applyingServer || !detail.value?.can_edit) return
   saveState.value = 'dirty'
   if (timer) clearTimeout(timer)
   timer = setTimeout(() => { timer = null; save() }, 1200)
@@ -163,7 +163,7 @@ async function testPatient() {
   busy.value = 'test'
   banner.value = null
   try {
-    if (!(await save())) throw new Error('Enregistrement impossible.')
+    if (canEdit.value && !(await save())) throw new Error('Enregistrement impossible.')
     const { attempt_id } = await authoringApi.test(id.value)
     window.open(router.resolve({ name: 'chat', params: { attemptId: attempt_id } }).href, '_blank')
     detail.value = await authoringApi.getCase(id.value)
@@ -198,6 +198,31 @@ const published = computed(() => detail.value?.versions.filter((v) => v.status =
 const tests = computed(() => detail.value?.versions.filter((v) => v.status === 'test') || [])
 const title = computed(() => sheet.value?.station.title || 'Station sans titre')
 
+// ---------- Relecture (facultative, ne bloque pas la publication) ----------
+const reviewNote = ref('')
+const reviewBusy = ref(false)
+const canEdit = computed(() => !!detail.value?.can_edit)
+const review = computed(() => detail.value?.review)
+const fmtDate = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('fr-FR', { day: 'numeric', month: 'long' }) : '')
+
+async function reviewAction(action: 'request' | 'clear' | 'mark') {
+  reviewBusy.value = true
+  banner.value = null
+  try {
+    if (action === 'request') detail.value = await authoringApi.requestReview(id.value)
+    else if (action === 'clear') detail.value = await authoringApi.clearReview(id.value)
+    else {
+      detail.value = await authoringApi.markReviewed(id.value, reviewNote.value)
+      reviewNote.value = ''
+      banner.value = { severity: 'success', text: 'Merci : la station est marquée comme relue.' }
+    }
+  } catch (e: any) {
+    banner.value = { severity: 'error', text: e.message }
+  } finally {
+    reviewBusy.value = false
+  }
+}
+
 function onApplied(where: string) {
   tab.value = where === 'facts' ? 'faits' : where
 }
@@ -225,6 +250,9 @@ onBeforeUnmount(() => {
           <h1>{{ title }}</h1>
           <div class="meta">
             <Tag :value="detail.status === 'published' ? 'Publiée' : 'Brouillon'" :severity="detail.status === 'published' ? 'success' : 'secondary'" />
+            <Tag v-if="review?.status === 'a_relire'" value="À relire" severity="warn" icon="pi pi-eye" />
+            <Tag v-else-if="review?.status === 'relue'" :value="review.changed_since_review ? 'Relue · modifiée depuis' : 'Relue'"
+                 :severity="review.changed_since_review ? 'warn' : 'success'" icon="pi pi-check" />
             <span v-if="published.length">version {{ published[0]!.version }} en ligne</span>
             <span class="save-state" :class="saveState">
               <template v-if="saveState === 'saving'"><i class="pi pi-spin pi-spinner"></i> Enregistrement…</template>
@@ -237,13 +265,17 @@ onBeforeUnmount(() => {
         <div class="top-actions" v-if="sheet">
           <Button label="Tester le patient" icon="pi pi-comments" severity="secondary" outlined :loading="busy === 'test'"
                   :disabled="busy !== null" @click="testPatient" />
-          <Button :label="detail.status === 'published' ? 'Publier une nouvelle version' : 'Publier'" icon="pi pi-send"
+          <Button v-if="canEdit" :label="detail.status === 'published' ? 'Publier une nouvelle version' : 'Publier'" icon="pi pi-send"
                   :loading="busy === 'publish'" :disabled="busy !== null || counts.erreur > 0"
                   :title="counts.erreur ? 'Corrigez d’abord les erreurs' : ''" @click="publish" />
         </div>
       </header>
 
       <Message v-if="banner" :severity="banner.severity" closable @close="banner = null">{{ banner.text }}</Message>
+      <Message v-if="!canEdit" severity="info" :closable="false">
+        Station de {{ detail.author }}, en lecture seule pour la relecture. Vous pouvez tester le patient, puis
+        laisser une remarque et la marquer comme relue (panneau « Vérifications »).
+      </Message>
       <Message v-if="detail.legacy" severity="info" :closable="false">
         Ce cas a été créé avant l'atelier : il n'a pas de fiche structurée et reste modifiable par l'administration.
       </Message>
@@ -259,6 +291,7 @@ onBeforeUnmount(() => {
               <Tab value="examen">Examen clinique</Tab>
               <Tab value="correction">Correction</Tab>
             </TabList>
+            <fieldset class="sheet-fieldset" :disabled="!canEdit">
             <TabPanels>
               <!-- Station -->
               <TabPanel value="station">
@@ -415,6 +448,7 @@ onBeforeUnmount(() => {
                 </div>
               </TabPanel>
             </TabPanels>
+            </fieldset>
           </Tabs>
         </main>
 
@@ -426,12 +460,39 @@ onBeforeUnmount(() => {
                 <span v-if="counts.erreur" class="badge danger">{{ counts.erreur }}</span>
                 <span v-else-if="counts.attention" class="badge warn">{{ counts.attention }}</span>
               </Tab>
-              <Tab value="assistant"><i class="pi pi-sparkles"></i> Générer</Tab>
+              <Tab v-if="canEdit" value="assistant"><i class="pi pi-sparkles"></i> Générer</Tab>
               <Tab value="preview">Aperçu</Tab>
               <Tab value="corpus">Référentiel</Tab>
             </TabList>
             <TabPanels>
               <TabPanel value="checks">
+                <section class="review-box" :class="review?.status || 'none'">
+                  <h4><i class="pi pi-eye"></i> Relecture par un collègue</h4>
+                  <template v-if="!review?.status">
+                    <p class="muted">Facultative : la station reste publiable sans relecture.</p>
+                    <Button v-if="canEdit" label="Demander une relecture" icon="pi pi-eye" size="small" outlined
+                            :loading="reviewBusy" @click="reviewAction('request')" />
+                  </template>
+                  <template v-else-if="review.status === 'a_relire'">
+                    <p>À relire depuis le {{ fmtDate(review.requested_at) }}. Visible des autres enseignants ; publiable en attendant.</p>
+                    <template v-if="detail.can_review">
+                      <Textarea v-model="reviewNote" auto-resize rows="3" fluid placeholder="Remarque pour l'auteur (facultative)" />
+                      <Button label="Marquer comme relue" icon="pi pi-check" size="small" :loading="reviewBusy" @click="reviewAction('mark')" />
+                    </template>
+                    <Button v-if="canEdit" label="Retirer la demande" size="small" text severity="secondary"
+                            :loading="reviewBusy" @click="reviewAction('clear')" />
+                  </template>
+                  <template v-else>
+                    <p>Relue par <strong>{{ review.reviewer }}</strong> le {{ fmtDate(review.reviewed_at) }}.</p>
+                    <blockquote v-if="review.note">{{ review.note }}</blockquote>
+                    <p v-if="review.changed_since_review" class="changed">La fiche a été modifiée depuis cette relecture.</p>
+                    <div v-if="canEdit" class="review-actions">
+                      <Button label="Demander une nouvelle relecture" icon="pi pi-eye" size="small" outlined
+                              :loading="reviewBusy" @click="reviewAction('request')" />
+                      <Button label="Retirer le statut" size="small" text severity="secondary" @click="reviewAction('clear')" />
+                    </div>
+                  </template>
+                </section>
                 <p v-if="!issues.length" class="ok"><i class="pi pi-check-circle"></i> Rien à signaler : la station peut être publiée.</p>
                 <p v-if="pendingReview" class="muted">{{ pendingReview }} proposition(s) de l'assistant à relire (badge orange).</p>
                 <template v-for="level in (['erreur', 'attention', 'conseil'] as const)" :key="level">
@@ -510,6 +571,18 @@ onBeforeUnmount(() => {
 .issue:hover { background: #f8fafc; }
 .prompt { white-space: pre-wrap; font-size: 0.82rem; background: #f8fafc; border-radius: 8px; padding: 0.75rem; max-height: 50vh; overflow: auto; }
 .versions { padding-left: 1.1rem; font-size: 0.88rem; }
+.sheet-fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+.sheet-fieldset:disabled :deep(.p-select),
+.sheet-fieldset:disabled :deep(.p-multiselect) { pointer-events: none; }
+.review-box { border: 1px solid #e2e8f0; border-radius: 10px; padding: 0.6rem 0.75rem; margin-bottom: 0.75rem;
+  display: flex; flex-direction: column; gap: 0.45rem; align-items: flex-start; }
+.review-box.a_relire { border-color: #f59e0b; background: #fffbeb; }
+.review-box.relue { border-color: #86efac; background: #f0fdf4; }
+.review-box h4 { margin: 0; font-size: 0.9rem; }
+.review-box p { margin: 0; font-size: 0.88rem; }
+.review-box blockquote { margin: 0; padding: 0.4rem 0.6rem; border-left: 3px solid #94a3b8; background: #fff; font-size: 0.88rem; white-space: pre-line; }
+.review-box .changed { color: #b45309; }
+.review-actions { display: flex; gap: 0.25rem; flex-wrap: wrap; }
 :deep(.flash) { outline: 3px solid #f59e0b; outline-offset: 4px; border-radius: 8px; transition: outline-color 1.5s; }
 @media (max-width: 1100px) {
   .layout { grid-template-columns: minmax(0, 1fr); }
