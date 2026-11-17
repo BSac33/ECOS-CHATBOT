@@ -1,0 +1,4 @@
+# Dépendances de test (en plus de requirements.txt)
+-r requirements.txt
+pytest
+pytest-asyncio

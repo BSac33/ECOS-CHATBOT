@@ -103,6 +103,7 @@ alembic downgrade -1
 **AI Utilities:**
 - `ai_chat_utils.py` - Gemini API integration for patient simulation
 - `vllm_chat_utils.py` - vLLM integration with structured output (Pydantic schemas)
+- `patient_agent.py` - Patient agent with tool calling (examiner tools: `afficher_document`, `resultat_examen_clinique`, `signaler_hors_cadre`). Tool execution is pure; the route applies events only after the arbiter allows the message. See `docs/PATIENT_AGENT.md`
 - Uses **structured output** with Pydantic models to enforce JSON schema compliance
 
 **Storage:**
@@ -154,9 +155,12 @@ Body: {"case_id": 1}
 ```
 POST /chat/attempts/{id}/chat
 Body: {"message": "Bonjour, que puis-je faire pour vous?"}
-→ Saves student message in chat_messages table
-→ Calls AI (Gemini/vLLM) with patient_prompt + history
-→ Returns patient reply + optional attachments
+→ Arbiter (vLLM 3B) and patient agent run IN PARALLEL
+→ If arbiter blocks: patient generation cancelled, nothing stored in transcript,
+  moderation_events row (action="blocked"), ChatOut.blocked=true
+→ Else saves student + patient messages, plus "examiner" messages for tool results
+  (exam findings, documents shown) and moderation_events for flags
+→ Returns patient reply + attachments + examiner_notes
 ```
 
 **3. Finalization**
@@ -257,9 +261,11 @@ The arbiter LLM evaluates whether students attempt to extract scenario details, 
 ## Testing
 
 ```bash
-# Backend unit tests (if implemented)
+# Backend unit tests (SQLite in memory + simulated LLM, no GPU/Postgres needed)
 cd backend_ecos_chatbot/app
+pip install -r requirements-dev.txt
 pytest
+# Against a migrated PostgreSQL: TEST_DATABASE_URL=postgresql://... pytest tests/test_chat_route.py
 
 # Frontend type checking
 cd frontend
@@ -299,6 +305,7 @@ Set `LLM_PROVIDER=vllm` in `fastapi.env` and configure vLLM endpoint. The code a
 - `docs/EVALUATION.md` - Comprehensive evaluation system documentation
 - `docs/STRUCTURED_OUTPUT.md` - Pydantic structured output implementation
 - `docs/STATION_TYPES.md` - Station type definitions
+- `docs/PATIENT_AGENT.md` - Patient agent tool calling, guardrails, moderation events
 - `docs/ATTACHMENTS.md` - File attachment system
 - `docs/USER_ROUTES.md` - User API documentation
 - `docs/POSTGRESQL_SETUP.md` - Database setup guide
@@ -311,7 +318,8 @@ Set `LLM_PROVIDER=vllm` in `fastapi.env` and configure vLLM endpoint. The code a
 - `users` - Student/teacher/admin accounts
 - `clinical_cases` - ECOS station definitions
 - `attempts` - Student attempt sessions
-- `chat_messages` - Conversation transcripts
+- `chat_messages` - Conversation transcripts (roles: system, student, patient, examiner)
+- `moderation_events` - Student misconduct (blocked by arbiter or flagged by patient agent)
 - `evaluation_grids` - Assessment criteria (JSON column)
 - `evaluation_results` - Cached evaluation summaries
 - `evaluation_item_results` - Individual item scores for analytics

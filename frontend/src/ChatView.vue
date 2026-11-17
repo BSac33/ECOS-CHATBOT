@@ -47,7 +47,6 @@ import { useRoute } from 'vue-router';
 import ChatHeader from './components/ChatHeader.vue';
 import Message from './components/Message.vue';
 import Textbox from './components/Textbox.vue';
-import { apiService } from './services/api';
 
 // ============= INTERFACES =============
 
@@ -57,9 +56,25 @@ import { apiService } from './services/api';
  */
 interface ChatMessage {
     id: string;
-    role: 'student' | 'patient' | 'system';
+    role: 'student' | 'patient' | 'system' | 'examiner';
     content: string;
     created_at: string;
+    attachment_id?: string | null;
+    attachment_mime_type?: string | null;
+    // Message étudiant refusé par les garde-fous (non transmis au patient)
+    blocked?: boolean;
+}
+
+/**
+ * Information transmise par l'examinateur (résultats d'examen, document affiché)
+ */
+interface ExaminerNote {
+    kind: 'exam_findings' | 'document';
+    title: string;
+    content: string;
+    attachment_id?: string | null;
+    file_url?: string | null;
+    mime_type?: string | null;
 }
 
 /**
@@ -68,6 +83,26 @@ interface ChatMessage {
 interface ChatResponse {
     patient_reply: string;
     attachments?: string[];
+    blocked?: boolean;
+    examiner_notes?: ExaminerNote[];
+}
+
+/**
+ * Convertit une note de l'examinateur au même format que les messages
+ * "examiner" renvoyés par GET /messages (rechargement de la page)
+ */
+function examinerNoteToMessage(note: ExaminerNote): ChatMessage {
+    const content = note.kind === 'document'
+        ? `Document affiché – ${note.title}`
+        : `Examen clinique – ${note.title} : ${note.content}`;
+    return {
+        id: crypto.randomUUID(),
+        role: 'examiner',
+        content,
+        created_at: new Date().toISOString(),
+        attachment_id: note.attachment_id ?? null,
+        attachment_mime_type: note.mime_type ?? null,
+    };
 }
 
 // ============= STATE RÉACTIF =============
@@ -188,6 +223,22 @@ async function handleSendMessage(messageContent: string) {
         
         const chatResponse: ChatResponse = await response.json();
         
+        // ===== MESSAGE BLOQUÉ PAR LES GARDE-FOUS =====
+        // Le message n'entre pas dans le transcript : on le marque comme non transmis
+        // et on affiche l'avertissement comme message système (hors personnage).
+        if (chatResponse.blocked) {
+            const sent = messages.value.find(m => m.id === studentMessage.id);
+            if (sent) sent.blocked = true;
+            messages.value.push({
+                id: crypto.randomUUID(),
+                role: 'system',
+                content: chatResponse.patient_reply,
+                created_at: new Date().toISOString()
+            });
+            await scrollToBottom();
+            return;
+        }
+        
         // ===== AJOUTER LA RÉPONSE DU PATIENT =====
         const patientMessage: ChatMessage = {
             id: crypto.randomUUID(), // ID unique pour la réponse
@@ -197,10 +248,12 @@ async function handleSendMessage(messageContent: string) {
         };
         
         messages.value.push(patientMessage);
-        await scrollToBottom();
         
-        // TODO: Gérer les attachments si présents
-        // if (chatResponse.attachments) { ... }
+        // ===== NOTES DE L'EXAMINATEUR (examen clinique, documents) =====
+        for (const note of chatResponse.examiner_notes ?? []) {
+            messages.value.push(examinerNoteToMessage(note));
+        }
+        await scrollToBottom();
         
     } catch (error) {
         console.error('Erreur lors de l\'envoi du message:', error);

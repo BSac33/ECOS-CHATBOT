@@ -29,18 +29,27 @@ services:
               capabilities: [gpu]
     command:
       - --model
-      - Qwen/Qwen2.5-7B-Instruct
+      # Qwen3-8B : meilleur suivi des consignes et tool calling plus fiable que Qwen2.5-7B.
+      # Le backend désactive le mode "thinking" (chat_template_kwargs.enable_thinking=false).
+      # Retour arrière possible : Qwen/Qwen2.5-7B-Instruct (même parser d'outils).
+      - Qwen/Qwen3-8B
       - --dtype
-      - float16
+      - bfloat16
       - --max-model-len
       - "32768"
-      # L40S (48GB) : marge de sécurité pour éviter l'OOM
+      # Budget GPU sur une seule L40S (48 Go), partagée avec l'arbitre :
+      #   patient 0.55 + arbitre 0.25 = 0.80 -> ~9 Go libres pour STT/TTS (phase voix).
+      # (l'ancienne config 0.88 + 0.35 dépassait 100 % du GPU)
       - --gpu-memory-utilization
-      - "0.88"
+      - "0.55"
       - --tensor-parallel-size
       - "1"
       # Optionnel mais utile pour perfs/latence (à garder si supporté)
       - --enable-prefix-caching
+      # Tool calling (format Hermes, utilisé par Qwen2.5 et Qwen3)
+      - --enable-auto-tool-choice
+      - --tool-call-parser
+      - hermes
 
   # Modèle arbitre pour analyse et filtrage des messages étudiants
   # Sur une seule L40S, on le fait tourner sur le même GPU avec une conso réduite.
@@ -75,9 +84,9 @@ services:
       - float16
       - --max-model-len
       - "8192"
-      # Conso GPU réduite pour cohabiter avec le 7B
+      # Conso GPU réduite pour cohabiter avec le modèle patient (voir budget ci-dessus)
       - --gpu-memory-utilization
-      - "0.35"
+      - "0.25"
       - --tensor-parallel-size
       - "1"
       - --enable-prefix-caching

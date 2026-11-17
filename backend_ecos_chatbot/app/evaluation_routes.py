@@ -118,6 +118,9 @@ def evaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_s
             transcript_parts.append(f"ÉTUDIANT: {msg.content}")
         elif msg.role.value == "patient":
             transcript_parts.append(f"PATIENT: {msg.content}")
+        elif msg.role.value == "examiner":
+            # Résultats d'examen clinique / documents montrés à l'étudiant
+            transcript_parts.append(f"EXAMINATEUR: {msg.content}")
         # On ignore les messages system
     
     transcript = "\n\n".join(transcript_parts)

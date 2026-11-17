@@ -31,8 +31,9 @@ def clear_database(session: Session):
     print("🗑️  Nettoyage de la base de données...")
     
     # Supprimer dans l'ordre inverse des dépendances
-    from models import Message, Attempts, Attachment
+    from models import Message, Attempts, Attachment, ModerationEvent
     
+    session.query(ModerationEvent).delete()
     session.query(Message).delete()
     session.query(Attempts).delete()
     session.query(Attachment).delete()
@@ -156,6 +157,46 @@ COMPORTEMENT :
 - Si l'étudiant te rassure, tu te calmes un peu
 
 Reste naturel et humain. Tu as peur mais tu fais confiance au médecin.""",
+        
+        # Résultats communiqués par l'examinateur si l'étudiant examine le patient
+        # (outil `resultat_examen_clinique` de l'agent patient)
+        exam_findings=[
+            {
+                "id": "constantes",
+                "label": "Constantes vitales",
+                "findings": "PA 158/94 mmHg aux deux bras, FC 102/min régulière, FR 18/min, SpO2 97 % en air ambiant, T 36,8 °C."
+            },
+            {
+                "id": "inspection",
+                "label": "Inspection générale",
+                "findings": "Patient anxieux, pâle, sueurs profuses au front. Conscient et orienté."
+            },
+            {
+                "id": "auscultation_cardiaque",
+                "label": "Auscultation cardiaque",
+                "findings": "Bruits du cœur réguliers, tachycardes. Pas de souffle, pas de frottement péricardique."
+            },
+            {
+                "id": "auscultation_pulmonaire",
+                "label": "Auscultation pulmonaire",
+                "findings": "Murmure vésiculaire symétrique, pas de crépitants ni de sibilants."
+            },
+            {
+                "id": "pouls_peripheriques",
+                "label": "Pouls périphériques",
+                "findings": "Pouls radiaux et fémoraux présents et symétriques."
+            },
+            {
+                "id": "signes_insuffisance_cardiaque",
+                "label": "Signes d'insuffisance cardiaque",
+                "findings": "Pas de turgescence jugulaire, pas de reflux hépato-jugulaire, pas d'œdème des membres inférieurs."
+            },
+            {
+                "id": "palpation_thoracique",
+                "label": "Palpation thoracique",
+                "findings": "La palpation ne reproduit pas la douleur."
+            },
+        ],
         
         duration_seconds=360  # 6 minutes
     )

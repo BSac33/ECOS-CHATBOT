@@ -463,6 +463,7 @@ RÈGLES CRITIQUES (ANTI-HALLUCINATION):
 - Tu n'attribues des points (points_awarded > 0) QUE si tu fournis au moins UNE citation EXACTE du transcript (copier-coller mot pour mot, entre guillemets).
 - Si tu ne peux pas citer exactement, alors points_awarded=0 et is_validated=false.
 - N'invente jamais de citations.
+- Les lignes "EXAMINATEUR:" indiquent seulement ce qui a été montré/communiqué à l'étudiant (résultats d'examen, documents). Elles ne valident JAMAIS un item à elles seules : la citation doit venir des paroles de l'ÉTUDIANT.
 
 COUVERTURE OBLIGATOIRE:
 - Tu dois produire exactement un item de sortie pour CHAQUE item de la grille.

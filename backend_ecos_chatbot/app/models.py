@@ -8,6 +8,7 @@ from datetime import date, datetime
 from sqlalchemy import Column
 from sqlalchemy.types import JSON
 from pydantic import BaseModel
+from pydantic import Field as PydanticField
 
 class AttemptCreateIn(BaseModel):
     case_id: int
@@ -21,9 +22,26 @@ class AttemptOut(BaseModel):
 class ChatIn(BaseModel):
     message: str
 
+class ExaminerNoteOut(BaseModel):
+    """Information transmise par l'examinateur (hors personnage patient).
+
+    kind = "exam_findings" : résultats d'examen clinique demandés par l'étudiant
+    kind = "document"      : examen complémentaire / document affiché (ECG, bio, imagerie...)
+    """
+    kind: str
+    title: str
+    content: str
+    attachment_id: Optional[str] = None
+    file_url: Optional[str] = None
+    mime_type: Optional[str] = None
+
 class ChatOut(BaseModel):
     patient_reply: str
     attachments: Optional[List[str]] = None  # UUIDs des fichiers attachés
+    # True si le message étudiant a été bloqué par les garde-fous :
+    # patient_reply contient alors le message de l'examinateur (hors personnage)
+    blocked: bool = False
+    examiner_notes: List[ExaminerNoteOut] = []
 
 class AttachmentUploadOut(BaseModel):
     id: str  # UUID sérialisé
@@ -73,6 +91,16 @@ class UserOut(BaseModel):
 
 # ============= ADMIN MODELS =============
 
+class ExamFindingIn(BaseModel):
+    """Résultat d'examen clinique communiqué par l'examinateur si l'étudiant le demande.
+
+    Ex: {"id": "auscultation_cardiaque", "label": "Auscultation cardiaque",
+         "findings": "Bruits du cœur réguliers, pas de souffle."}
+    """
+    id: str = PydanticField(pattern=r"^[a-z0-9_]+$", max_length=64)
+    label: str
+    findings: str
+
 class ClinicalCaseCreateIn(BaseModel):
     """Création d'un nouveau cas clinique"""
     title: str
@@ -80,6 +108,7 @@ class ClinicalCaseCreateIn(BaseModel):
     student_instructions: str
     scenario_context: str
     patient_prompt: Optional[str] = None
+    exam_findings: Optional[List[ExamFindingIn]] = None
     duration_seconds: int = 900  # 15 min par défaut
     status: str = "draft"  # "draft" | "published"
     # created_by sera ajouté automatiquement depuis l'auth
@@ -92,6 +121,7 @@ class ClinicalCaseUpdateIn(BaseModel):
     student_instructions: Optional[str] = None
     scenario_context: Optional[str] = None
     patient_prompt: Optional[str] = None
+    exam_findings: Optional[List[ExamFindingIn]] = None
     duration_seconds: Optional[int] = None
     status: Optional[str] = None
 
@@ -104,6 +134,7 @@ class ClinicalCaseOut(BaseModel):
     student_instructions: str
     scenario_context: str
     patient_prompt: Optional[str]
+    exam_findings: Optional[List[dict]] = None
     duration_seconds: int
     status: str
     created_by: int
@@ -182,6 +213,8 @@ class ChatRole(str, Enum):
     system = "system"
     student = "student"
     patient = "patient"
+    # Informations données par l'examinateur (résultats d'examen clinique, documents affichés)
+    examiner = "examiner"
     
 class UserRole(str, Enum):
     student = "student"
@@ -250,6 +283,11 @@ class ClinicalCase(SQLModel, table=True):
     # Pour patient_interview, diagnosis_announcement, mixed : obligatoire
     # Pour exam_analysis, procedure : non utilisé (pas de chat en temps réel)
     patient_prompt: Optional[str] = None
+    
+    # Résultats d'examen clinique communiqués par l'examinateur à la demande de l'étudiant
+    # (outil `resultat_examen_clinique` de l'agent patient).
+    # Format : [{"id": "constantes", "label": "Constantes vitales", "findings": "..."}]
+    exam_findings: Optional[List[dict]] = Field(default=None, sa_column=Column(JSON, nullable=True))
     
     duration_seconds: int
     
@@ -330,6 +368,29 @@ class Message(SQLModel, table=True):
     is_active: bool = Field(default=True)
     
     
+class ModerationEvent(SQLModel, table=True):
+    """Trace des écarts de l'étudiant (insultes, hors sujet, tentative de triche...).
+
+    source = "arbiter"       : détecté par le LLM arbitre (message bloqué ou ton agressif)
+    source = "patient_agent" : signalé par le patient via l'outil `signaler_hors_cadre`
+    action = "blocked"       : message refusé, absent du transcript
+    action = "flagged"       : message conservé dans le transcript mais signalé
+    """
+    __tablename__ = "moderation_events"
+
+    id: UUID = Field(default_factory=uuid4, primary_key=True)
+    attempt_id: UUID = Field(foreign_key="attempts.id", index=True)
+    message_id: Optional[UUID] = Field(default=None, foreign_key="chat_messages.id")
+    source: str = Field(index=True)
+    category: str = Field(index=True)
+    severity: Optional[str] = None
+    action: str
+    detail: Optional[str] = None
+    # Contenu du message étudiant (utile surtout pour les messages bloqués, absents du transcript)
+    student_message: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
 class EvaluationGrid(SQLModel, table=True):
     __tablename__ = "evaluation_grids"
     
