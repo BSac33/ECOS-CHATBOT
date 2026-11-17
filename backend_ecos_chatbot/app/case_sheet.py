@@ -82,8 +82,9 @@ Domain = Literal[
     "strategie_prise_en_charge", "education_prevention", "annonce_information", "urgence_vitale",
     "communication_interprofessionnelle", "iconographie", "procedure",
 ]
-# Interlocuteur de l'étudiant : patient (ou proche) standardisé, ou personne (examinateurs muets)
-Interlocutor = Literal["patient", "aucun"]
+# Interlocuteur de l'étudiant : patient (ou proche) standardisé, professionnel de santé simulé
+# (collègue, externe, médecin d'un autre service...), ou personne (examinateurs muets)
+Interlocutor = Literal["patient", "professionnel", "aucun"]
 
 # Échelles d'attitude des ECOS nationaux (cotées de 0 à 4)
 LEVEL_NAMES = ["inacceptable", "insuffisante", "suffisante", "satisfaisante", "remarquable"]
@@ -319,11 +320,63 @@ def compile_patient_prompt(sheet: CaseSheet) -> str:
     return "\n".join(lines).strip()
 
 
+def compile_professional_prompt(sheet: CaseSheet) -> str:
+    """Rôle d'un professionnel de santé simulé (PSS) : un collègue, pas un patient."""
+    p, s = sheet.patient, sheet.station
+    lines: List[str] = []
+    name = " ".join(x for x in (p.first_name.strip(), p.last_name.strip()) if x)
+    role = p.occupation.strip().rstrip(".") or "un professionnel de santé"
+    lines.append(f"Tu es {name}, {role}." if name else f"Tu es {role}.")
+    if s.setting.strip():
+        lines.append(f"Contexte : {s.setting.strip().rstrip('.')}.")
+    if s.student_role.strip():
+        lines.append(f"La personne qui s'adresse à toi est {s.student_role.strip().rstrip('.')}.")
+
+    def section(title: str, items: List[str]) -> None:
+        if items:
+            lines.append("")
+            lines.append(title)
+            lines.extend(f"- {i}" for i in items)
+
+    section("TON ÉTAT D'ESPRIT", [x.strip() for x in (p.personality, p.emotional_state) if x.strip()])
+    with_words = [f for f in sheet.facts if f.patient_words.strip()]
+    section("CE QUE TU DIS EN PREMIER", [_quote(f.patient_words) for f in with_words if f.disclosure == "spontane"])
+    section("CE QUE TU SAIS (tu le dis si on te le demande)",
+            [f"Si on t'interroge sur {_topic(f)} : {_quote(f.patient_words)}" for f in with_words
+             if f.disclosure == "sur_question"])
+    section("QUESTIONS QUE TU POSES (une à la fois, au fil de la discussion)",
+            [_quote(q) for q in p.spontaneous_questions if q.strip()])
+    section("TES RÉACTIONS", [f"{r.when.strip()} : {r.then.strip()}" for r in p.reactions
+                             if r.when.strip() and r.then.strip()])
+    never = [t.strip() for t in sheet.never_says if t.strip()]
+    rules = ["C'est l'étudiant qui est évalué : tu ne fais pas son travail. Tu ne donnes ni l'interprétation des "
+             "examens, ni le diagnostic, ni la conduite à tenir ; si on te demande ton avis, retourne la question.",
+             "Si on te demande une information qui n'est pas décrite ici, dis simplement que tu ne l'as pas."]
+    if never:
+        rules.append("Tu n'emploies jamais ces mots : " + ", ".join(never) + ".")
+    section("CE QUE TU NE FAIS PAS", rules)
+    return "\n".join(lines).strip()
+
+
+def interlocutor_label(sheet: CaseSheet) -> Optional[str]:
+    """Nom affiché de l'interlocuteur (« Patient », « Externe de garde »...) ; None sans interlocuteur."""
+    s, p = sheet.station, sheet.patient
+    if s.interlocutor == "aucun":
+        return None
+    if s.interlocutor == "professionnel":
+        role = p.occupation.strip().rstrip(".")
+        return (role[0].upper() + role[1:]) if role else "Professionnel de santé"
+    return "Patiente" if p.sex == "femme" else "Patient"
+
+
 def compile_scenario_context(sheet: CaseSheet) -> str:
     """Contexte pour l'évaluateur (jamais montré au patient ni à l'étudiant)."""
     p, c, s = sheet.patient, sheet.correction, sheet.station
     if s.interlocutor == "aucun":
         parts = ["Station sans interlocuteur : l'étudiant expose son raisonnement à voix haute aux examinateurs."]
+    elif s.interlocutor == "professionnel":
+        parts = [f"Interlocuteur : professionnel de santé simulé ({interlocutor_label(sheet)}). "
+                 "Communication entre soignants : vocabulaire médical attendu."]
     else:
         parts = [f"Patient : {_patient_name(p)}" + (f", {p.age} ans" if p.age else "")]
     if c.expected_diagnosis.strip():
@@ -361,9 +414,10 @@ def compile_instructions(sheet: CaseSheet) -> str:
     text = s.student_instructions.strip()
     if not text:
         return ""
+    gestures = s.domain in ("procedure", "examen_clinique", "urgence_vitale")
     if s.interlocutor == "aucun":
-        return f"{text}\n\n{INSTRUCTION_NO_INTERLOCUTOR}"
-    if s.domain in ("procedure", "examen_clinique", "urgence_vitale"):
+        return f"{text}\n\n{INSTRUCTION_NO_INTERLOCUTOR}" + (f"\n{INSTRUCTION_GESTURES}" if gestures else "")
+    if gestures:
         return f"{text}\n\n{INSTRUCTION_GESTURES}"
     return text
 
@@ -391,16 +445,19 @@ def compile_grid_items(sheet: CaseSheet) -> List[dict]:
 def compile_case(sheet: CaseSheet) -> dict:
     """Tous les champs d'exécution d'un cas, dérivés de la fiche."""
     grid = compile_grid_items(sheet)
-    has_patient = sheet.station.interlocutor == "patient"
+    interlocutor = sheet.station.interlocutor
+    persona_prompt = (compile_patient_prompt(sheet) if interlocutor == "patient"
+                      else compile_professional_prompt(sheet) if interlocutor == "professionnel" else None)
     return {
         "title": sheet.station.title.strip(),
         "station_type": station_type_for(sheet),
         "domain": sheet.station.domain,
-        "interlocutor": sheet.station.interlocutor,
+        "interlocutor": interlocutor,
+        "interlocutor_label": interlocutor_label(sheet),
         "duration_seconds": max(60, int(sheet.station.duration_minutes * 60)),
         "student_instructions": compile_instructions(sheet),
         "scenario_context": compile_scenario_context(sheet),
-        "patient_prompt": compile_patient_prompt(sheet) if has_patient else None,
+        "patient_prompt": persona_prompt,
         "exam_findings": [
             {"id": e.id or _slug(e.label), "label": e.label.strip(), "findings": e.findings.strip()}
             for e in sheet.exam_findings if e.label.strip() and e.findings.strip()
@@ -438,7 +495,8 @@ JARGON = [
 # Items de grille qui ne dépendent pas d'un fait du dossier (communication, synthèse)
 _NO_FACT_NEEDED = re.compile(
     r"presente|presentation|empathi|relationnel|ecoute|politesse|reformul|synthese|"
-    r"diagnostic|hypothese|examen complementaire|prescri|annonce|explique|information|conclu",
+    r"diagnosti|hypothese|examen complementaire|prescri|annonce|explique|information|conclu|rassur|"
+    r"mecanisme|test|procedure|critere|contre-indication|ecg|trace|document|interpret|analys|segment|onde|rythme",
 )
 
 
@@ -475,11 +533,14 @@ def check_sheet(sheet: CaseSheet) -> List[Issue]:
     if not s.edn_items:
         add("attention", "station.edn_items", "Rattachez la station à au moins un item EDN (sert aussi à l'assistant).")
     has_patient = s.interlocutor == "patient"
+    professional = s.interlocutor == "professionnel"
     interview = s.domain == "entretien_interrogatoire"
     for i, d in enumerate(s.documents):
         if not d.attachment_id:
             add("attention", f"station.documents[{i}]", f"« {d.label or 'Document'} » : ajoutez le fichier.")
-    if not has_patient and not s.documents and s.domain in ("iconographie", "synthese_paraclinique"):
+    if professional and not p.occupation.strip():
+        add("erreur", "patient.occupation", "Indiquez le rôle du professionnel simulé (ex. « cardiologue de garde au CHU »).")
+    if s.interlocutor == "aucun" and not s.documents and s.domain in ("iconographie", "synthese_paraclinique"):
         add("conseil", "station.documents", "Ajoutez les documents à interpréter (ECG, imagerie...).")
 
     if has_patient:
@@ -508,7 +569,7 @@ def check_sheet(sheet: CaseSheet) -> List[Issue]:
         for term in never:
             if _contains_term(f.patient_words, term):
                 add("erreur", where, f"Le patient dirait « {term} », qui fait partie de ce qu'il ne doit jamais dire.")
-        jargon = [t for t in JARGON if _contains_term(f.patient_words, t)]
+        jargon = [t for t in JARGON if _contains_term(f.patient_words, t)] if has_patient else []
         if jargon:
             add("attention", where, f"Jargon dans la bouche du patient ({', '.join(jargon)}) : reformulez avec ses mots.")
 

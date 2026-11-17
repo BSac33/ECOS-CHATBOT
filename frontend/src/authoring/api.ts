@@ -92,7 +92,7 @@ export interface StationDocument { id: string; label: string; attachment_id: str
 export interface StationInfo {
   title: string
   domain: Domain
-  interlocutor: 'patient' | 'aucun'
+  interlocutor: 'patient' | 'professionnel' | 'aucun'
   documents: StationDocument[]
   source: string
   station_type: string

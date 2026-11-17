@@ -228,3 +228,60 @@ async def test_editor_preview_of_a_silent_station(session):
         r = await client.get(f"/authoring/cases/{case.id}")
         assert r.status_code == 200, r.text
         assert r.json()["preview"]["patient_prompt"] is None
+
+
+def colleague_sheet() -> CaseSheet:
+    """Station fictive avec un professionnel de santé simulé (appel d'un collègue)."""
+    sheet = CaseSheet()
+    s = sheet.station
+    s.title, s.domain, s.interlocutor = "Appel au médecin de garde", "communication_interprofessionnelle", "professionnel"
+    s.student_instructions = "Appelez le médecin de garde pour organiser la suite."
+    s.student_role = "l'interne des urgences d'un autre hôpital"
+    sheet.patient.occupation = "médecin de garde du service fictif"
+    sheet.patient.emotional_state = "Pressé mais disponible"
+    sheet.patient.spontaneous_questions = ["Que montre l'examen ?", "Que proposes-tu ?"]
+    sheet.facts = [Fact(category="contexte", label="Lits disponibles", patient_words="Il me reste un lit.",
+                        asked_about="les lits disponibles")]
+    sheet.correction.grid = [GridItem(id="i1", criterion="Se présente"), GridItem(id="i2", criterion="Formule sa demande")]
+    return sheet
+
+
+def test_professional_interlocutor_compiles_as_a_colleague():
+    c = compile_case(colleague_sheet())
+    assert c["interlocutor"] == "professionnel" and c["interlocutor_label"] == "Médecin de garde du service fictif"
+    prompt = c["patient_prompt"]
+    assert prompt.startswith("Tu es médecin de garde du service fictif.")
+    assert "La personne qui s'adresse à toi est l'interne des urgences d'un autre hôpital." in prompt
+    assert "« Que montre l'examen ? »" in prompt and "tu ne fais pas son travail" in prompt
+    assert "Tu ne connais pas ton diagnostic" not in prompt            # règles du patient absentes
+    assert "professionnel de santé simulé" in c["scenario_context"]
+    assert not [i for i in check_sheet(colleague_sheet()) if i.level == "erreur"]
+    sheet = colleague_sheet()
+    sheet.patient.occupation = ""
+    assert any(i.field == "patient.occupation" and i.level == "erreur" for i in check_sheet(sheet))
+    # Vocabulaire médical permis : pas d'alerte « jargon »
+    sheet = colleague_sheet()
+    sheet.facts[0].patient_words = "Bradycardie à 40 avec un BAV complet."
+    assert not any("Jargon" in i.message for i in check_sheet(sheet))
+
+
+def test_professional_role_rules_and_transcript():
+    from types import SimpleNamespace
+
+    from evaluation_routes import build_evaluation_transcript
+    from models import ChatRole
+    from patient_agent import CaseToolContext, build_agent_system_instruction
+
+    ctx = CaseToolContext(documents=[], exam_findings=[])
+    pro = build_agent_system_instruction("Tu es cardiologue de garde.", ctx, role="professionnel")
+    assert pro.startswith("Tu es un professionnel de santé simulé") and "Tu es cardiologue de garde." in pro
+    assert "Tu incarnes le patient" not in pro
+    patient = build_agent_system_instruction("Tu es Jean.", ctx)
+    assert patient.startswith("Tu incarnes le patient")
+
+    msg = lambda role, content: SimpleNamespace(role=role, content=content, modality="text",
+                                                interrupted_by=None, spoken_content=None)
+    transcript, _ = build_evaluation_transcript(
+        [msg(ChatRole.student, "Bonjour, interne des urgences."), msg(ChatRole.patient, "Je t'écoute.")],
+        professional="Cardiologue de garde")
+    assert transcript == "ÉTUDIANT: Bonjour, interne des urgences.\n\nPROFESSIONNEL DE SANTÉ (Cardiologue de garde): Je t'écoute."

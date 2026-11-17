@@ -7,7 +7,7 @@
                 <span class="wave delay"></span>
                 <div class="avatar"><i class="pi pi-user"></i></div>
             </div>
-            <div class="patient-label">Patient</div>
+            <div class="patient-label">{{ props.who || 'Patient' }}</div>
 
             <p class="status" role="status" aria-live="polite">{{ statusText }}</p>
 
@@ -89,6 +89,8 @@ interface ChatMessage {
 }
 
 const props = defineProps<{
+    /** Nom de l'interlocuteur (« Patient », « Cardiologue de garde »...) */
+    who?: string;
     status: ConsultationStatus;
     level: number;
     muted: boolean;
@@ -96,6 +98,12 @@ const props = defineProps<{
     examinerNotes: ChatMessage[];
     notice: string | null;
 }>();
+const subject = computed(() => {
+    const who = props.who || 'Patient';
+    if (who === 'Patient') return 'Le patient';
+    if (who === 'Patiente') return 'La patiente';
+    return who;
+});
 
 const emit = defineEmits<{
     'toggle-mute': [];
@@ -109,9 +117,9 @@ const statusText = computed(() => {
     switch (props.status) {
         case 'connecting': return 'Connexion…';
         case 'user_speaking': return 'Vous parlez…';
-        case 'thinking': return 'Le patient réfléchit…';
-        case 'speaking': return 'Le patient parle…';
-        default: return 'Le patient vous écoute';
+        case 'thinking': return `${subject.value} réfléchit…`;
+        case 'speaking': return `${subject.value} parle…`;
+        default: return `${subject.value} vous écoute`;
     }
 });
 

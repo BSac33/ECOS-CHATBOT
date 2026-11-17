@@ -5,7 +5,7 @@ L'évaluateur ne parle JAMAIS avec l'étudiant pendant l'examen.
 L'évaluation se fait après la fin de la station en analysant le transcript complet.
 """
 
-from typing import Annotated
+from typing import Annotated, Optional
 from fastapi import APIRouter, Depends, HTTPException
 from sqlmodel import Session, select
 from uuid import UUID
@@ -34,11 +34,16 @@ router = APIRouter()
 INTERRUPTION_LABEL = "coupé par l'étudiant"
 
 
+def _spoken_text(msg) -> str:
+    return msg.spoken_content if msg.interrupted_by and msg.spoken_content is not None else msg.content
+
+
 NO_INTERLOCUTOR_HEADER = ("[STATION SANS INTERLOCUTEUR] L'étudiant expose son raisonnement à voix haute "
                           "devant les examinateurs, qui n'interviennent pas.")
 
 
-def build_evaluation_transcript(messages: list, no_interlocutor: bool = False) -> tuple[str, int]:
+def build_evaluation_transcript(messages: list, no_interlocutor: bool = False,
+                                professional: Optional[str] = None) -> tuple[str, int]:
     """Transcript soumis à l'évaluateur, et nombre de fois où l'étudiant a coupé la
     parole au patient. Une réplique coupée n'y figure que pour ce qui a été prononcé."""
     parts = []
@@ -51,6 +56,9 @@ def build_evaluation_transcript(messages: list, no_interlocutor: bool = False) -
         role = msg.role.value
         if role == "student":
             parts.append(f"ÉTUDIANT: {msg.content}")
+        elif role == "patient" and professional:
+            # Professionnel de santé simulé : même canal que le patient, autre rôle
+            parts.append(f"PROFESSIONNEL DE SANTÉ ({professional}): {_spoken_text(msg)}")
         elif role == "patient":
             if msg.interrupted_by:
                 interruptions += 1
@@ -166,7 +174,9 @@ def evaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_s
         )
     
     # Construire le transcript (commandes filtrées, coupures de parole signalées)
-    transcript, _ = build_evaluation_transcript(messages, no_interlocutor=info.get("interlocutor") == "aucun")
+    transcript, _ = build_evaluation_transcript(
+        messages, no_interlocutor=info.get("interlocutor") == "aucun",
+        professional=info.get("interlocutor_label") if info.get("interlocutor") == "professionnel" else None)
     
     # Préparer le contexte du cas
     case_context = f"""

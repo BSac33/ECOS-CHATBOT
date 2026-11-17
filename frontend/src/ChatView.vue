@@ -8,6 +8,7 @@
             <!-- Consultation orale : pas de texte par défaut, la transcription reste enregistrée -->
             <VoiceConsultation
                 v-if="consulting"
+                :who="interlocutorLabel"
                 :status="consultationStatus"
                 :level="micLevel"
                 :muted="micMuted"
@@ -50,7 +51,7 @@
             <!-- Le patient parle : possibilité de lui couper la parole -->
             <div v-if="isPatientSpeaking && !consulting" class="speaking-bar">
                 <i class="pi pi-volume-up"></i>
-                <span>Le patient parle…</span>
+                <span>{{ interlocutorLabel === 'Patiente' ? 'La patiente' : interlocutorLabel === 'Patient' ? 'Le patient' : interlocutorLabel }} parle…</span>
                 <Button label="Couper" size="small" text severity="secondary" @click="voice.interrupt()" />
             </div>
 
@@ -197,6 +198,8 @@ const isSendingMessage = ref(false);
 const isPatientTyping = ref(false);
 /** Station sans patient ni professionnel simulé : l'étudiant parle seul devant les examinateurs */
 const noInterlocutor = ref(false);
+/** « Patient », « Patiente » ou rôle du professionnel de santé simulé */
+const interlocutorLabel = ref('Patient');
 
 // ============= FONCTIONS UTILITAIRES =============
 
@@ -661,7 +664,11 @@ function handleVoiceEvent(event: VoiceEvent) {
 async function loadStationInfo() {
     try {
         const response = await fetch(`/chat/attempts/${attemptId}/case-info`, { credentials: 'include' });
-        if (response.ok) noInterlocutor.value = (await response.json()).interlocutor === 'aucun';
+        if (response.ok) {
+            const info = await response.json();
+            noInterlocutor.value = info.interlocutor === 'aucun';
+            interlocutorLabel.value = info.interlocutor_label || 'Patient';
+        }
     } catch {
         // information facultative : comportement par défaut (avec patient)
     }

@@ -189,6 +189,7 @@ def get_case_info(attempt_id: UUID, session: Session = Depends(get_session), use
         "is_test": attempt.is_test,
         # "aucun" : station sans interlocuteur (l'étudiant expose à voix haute, personne ne répond)
         "interlocutor": info.get("interlocutor", "patient"),
+        "interlocutor_label": info.get("interlocutor_label", "Patient"),
         "domain": info.get("domain"),
     }
 
@@ -322,6 +323,7 @@ class _Turn:
     modality: str = "text"  # "voice" pour un tour dit à l'oral
     voice_id: str | None = None
     silent: bool = False    # station sans interlocuteur : rien ne répond
+    role: str = "patient"   # "professionnel" : professionnel de santé simulé (PSS)
 
 
 def _prepare_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: User, modality: str = "text") -> _Turn:
@@ -403,6 +405,7 @@ def _prepare_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: Use
         keyword_docs=[] if use_agent else _keyword_documents(ctx, payload.message, case.id, session),
         modality=modality,
         voice_id=version.voice_id if version else case.voice_id,
+        role=(info or {}).get("interlocutor", "patient"),
     )
 
 
@@ -425,6 +428,7 @@ def _patient_stream(turn: _Turn) -> AsyncIterator[StreamItem]:
             ctx=turn.ctx,
             station_state=turn.station_state,
             oral=turn.modality == "voice",
+            role=turn.role,
         )
     return _legacy_stream(turn)
 

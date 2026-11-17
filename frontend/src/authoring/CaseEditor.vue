@@ -119,10 +119,12 @@ const voiceOptions = computed(() => {
 })
 const DOMAINS = Object.entries(DOMAIN_LABELS).map(([value, label]) => ({ value, label }))
 const INTERLOCUTORS = [
-  { value: 'patient', label: 'Patient standardisé' },
-  { value: 'aucun', label: 'Aucun (face aux examinateurs)' },
+  { value: 'patient', label: 'Patient (PS)' },
+  { value: 'professionnel', label: 'Soignant (PSS)' },
+  { value: 'aucun', label: 'Aucun' },
 ]
 const noPatient = computed(() => sheet.value?.station.interlocutor === 'aucun')
+const professional = computed(() => sheet.value?.station.interlocutor === 'professionnel')
 const SEX = [{ value: 'femme', label: 'Femme' }, { value: 'homme', label: 'Homme' }, { value: 'autre', label: 'Autre' }]
 const REGISTERS = [
   { value: 'courant', label: 'Courant' }, { value: 'simple', label: 'Simple' },
@@ -275,7 +277,7 @@ onBeforeUnmount(() => {
           </div>
         </div>
         <div class="top-actions" v-if="sheet">
-          <Button :label="noPatient ? 'Tester la station' : 'Tester le patient'" icon="pi pi-comments" severity="secondary" outlined :loading="busy === 'test'"
+          <Button :label="sheet.station.interlocutor === 'patient' ? 'Tester le patient' : 'Tester la station'" icon="pi pi-comments" severity="secondary" outlined :loading="busy === 'test'"
                   :disabled="busy !== null" @click="testPatient" />
           <Button v-if="canEdit" :label="detail.status === 'published' ? 'Publier une nouvelle version' : 'Publier'" icon="pi pi-send"
                   :loading="busy === 'publish'" :disabled="busy !== null || counts.erreur > 0"
@@ -374,6 +376,11 @@ onBeforeUnmount(() => {
                   Station sans interlocuteur : l'étudiant expose son raisonnement aux examinateurs, il n'y a pas de patient à jouer.
                 </Message>
                 <div v-else class="form">
+                  <Message v-if="professional" severity="info" :closable="false">
+                    Professionnel de santé simulé (collègue, externe, médecin d'un autre service) : indiquez son rôle
+                    dans « Rôle ». Il parle en soignant et ne fait pas le travail de l'étudiant ; ses questions se
+                    saisissent dans « Questions qu'il pose de lui-même ».
+                  </Message>
                   <div class="row">
                     <div class="field"><label for="fn">Prénom</label><InputText id="fn" v-model="sheet.patient.first_name" fluid /></div>
                     <div class="field"><label for="ln">Nom</label><InputText id="ln" v-model="sheet.patient.last_name" fluid /></div>
@@ -387,7 +394,7 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                   <div class="row">
-                    <div class="field"><label for="occ">Profession</label><InputText id="occ" v-model="sheet.patient.occupation" fluid placeholder="Comptable" /></div>
+                    <div class="field" data-field="patient.occupation"><label for="occ">{{ professional ? 'Rôle' : 'Profession' }}</label><InputText id="occ" v-model="sheet.patient.occupation" fluid :placeholder="professional ? 'cardiologue de garde au CHU' : 'Comptable'" /></div>
                     <div class="field"><label for="liv">Situation de vie</label><InputText id="liv" v-model="sheet.patient.living_situation" fluid placeholder="Marié, deux enfants adultes" /></div>
                   </div>
                   <div class="row" data-field="patient.personality">

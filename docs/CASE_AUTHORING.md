@@ -46,7 +46,7 @@ Statut porté par la station (`clinical_cases.review_status`), indépendant de l
 | Champ | Valeurs |
 |---|---|
 | `station.domain` | les 11 domaines : entretien/interrogatoire, examen clinique, synthèse paraclinique, stratégie diagnostique, stratégie de prise en charge, éducation/prévention, annonce/information, urgence vitale, communication interprofessionnelle, iconographie, procédure |
-| `station.interlocutor` | `patient` (patient ou proche standardisé, joué par le modèle) ou `aucun` (station sans PS ni PSS : l'étudiant parle seul devant les examinateurs) |
+| `station.interlocutor` | `patient` (patient ou proche standardisé, joué par le modèle), `professionnel` (professionnel de santé simulé, PSS : externe, médecin de garde, infirmière...) ou `aucun` (station sans PS ni PSS : l'étudiant parle seul devant les examinateurs) |
 | `station.documents` | documents de la vignette (ECG, imagerie...) : pièces jointes montrées dans la conversation dès le début de la station |
 
 **Station sans interlocuteur** : rien ne répond (ni patient, ni arbitre, ni voix). Chaque prise de
@@ -55,8 +55,15 @@ parole de l'étudiant (texte, micro ou consultation mains libres) est enregistr�
 commence par `[STATION SANS INTERLOCUTEUR]` : un item « explique au patient » est validé si
 l'étudiant l'explique aux examinateurs.
 
-**Procédure, examen clinique, urgence vitale avec patient** : la vignette rappelle de décrire à
-voix haute chaque geste (seul ce qui est dit est évalué).
+**Professionnel de santé simulé (PSS)** : le personnage est un soignant (son rôle se saisit dans
+« Rôle », champ `patient.occupation`). Il a ses propres règles de jeu : vocabulaire médical, ton
+professionnel, et il **ne fait jamais le travail de l'étudiant** (ni interprétation, ni diagnostic, ni
+conduite à tenir à sa place) ; il pose les questions prévues (« Questions qu'il pose de lui-même »).
+Pas de contrôle de jargon. Le transcript d'évaluation l'identifie comme
+`PROFESSIONNEL DE SANTÉ (<rôle>)`, et l'interface affiche son rôle (consultation orale).
+
+**Procédure, examen clinique, urgence vitale** : la vignette rappelle de décrire à voix haute chaque
+geste (seul ce qui est dit est évalué), y compris sans interlocuteur (gestes sur mannequin).
 
 Le domaine adapte les vérifications : le lien item ↔ fait n'est exigé que pour l'interrogatoire,
 le motif de consultation n'est obligatoire que pour l'interrogatoire, une station sans interlocuteur
