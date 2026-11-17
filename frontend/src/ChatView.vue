@@ -47,6 +47,7 @@ import { useRoute } from 'vue-router';
 import ChatHeader from './components/ChatHeader.vue';
 import Message from './components/Message.vue';
 import Textbox from './components/Textbox.vue';
+import { readSSE } from './services/sse';
 
 // ============= INTERFACES =============
 
@@ -202,57 +203,106 @@ async function handleSendMessage(messageContent: string) {
         messages.value.push(studentMessage);
         await scrollToBottom();
         
-        // ===== APPEL API =====
-        // Activer l'indicateur de frappe pendant l'attente
+        // ===== APPEL API EN STREAMING (SSE) =====
+        // L'indicateur de frappe reste affiché jusqu'au premier morceau de texte
         isPatientTyping.value = true;
         
-        // POST /chat/attempts/{attemptId}/chat
-        const response = await fetch(`/chat/attempts/${attemptId}/chat`, {
+        // POST /chat/attempts/{attemptId}/chat/stream
+        const response = await fetch(`/chat/attempts/${attemptId}/chat/stream`, {
             method: 'POST',
             headers: {
-                'Content-Type': 'application/json'
+                'Content-Type': 'application/json',
+                'Accept': 'text/event-stream'
             },
             credentials: 'include',
             body: JSON.stringify({ message: messageContent })
         });
         
+        // Les erreurs de validation (temps écoulé, tentative terminée...) restent des erreurs HTTP
         if (!response.ok) {
             const error = await response.json().catch(() => ({ detail: 'Erreur réseau' }));
             throw new Error(error.detail || 'Erreur lors de l\'envoi du message');
         }
         
-        const chatResponse: ChatResponse = await response.json();
+        // État du tour en cours (objet : modifié depuis les callbacks du flux)
+        const turn: {
+            patientMessage: ChatMessage | null;
+            pendingNotes: ChatMessage[];
+            addedIds: string[];
+            final: ChatResponse | null;
+            error: string | null;
+        } = { patientMessage: null, pendingNotes: [], addedIds: [], final: null, error: null };
+        
+        const pushMessage = (message: ChatMessage): ChatMessage => {
+            messages.value.push(message);
+            turn.addedIds.push(message.id);
+            // Récupérer le proxy réactif pour pouvoir modifier le message ensuite
+            return messages.value[messages.value.length - 1]!;
+        };
+        
+        // La bulle du patient est créée au premier morceau de texte ; les notes de
+        // l'examinateur arrivées avant sont affichées juste après elle.
+        const ensurePatientBubble = (): ChatMessage => {
+            if (!turn.patientMessage) {
+                isPatientTyping.value = false;
+                turn.patientMessage = pushMessage({
+                    id: crypto.randomUUID(),
+                    role: 'patient',
+                    content: '',
+                    created_at: new Date().toISOString()
+                });
+                turn.pendingNotes.forEach(pushMessage);
+                turn.pendingNotes = [];
+            }
+            return turn.patientMessage;
+        };
+        
+        await readSSE(response, ({ event, data }) => {
+            switch (event) {
+                case 'delta':
+                    ensurePatientBubble().content += (data as { text: string }).text;
+                    scrollToBottom();
+                    break;
+                case 'examiner_note': {
+                    const note = examinerNoteToMessage(data as ExaminerNote);
+                    if (turn.patientMessage) pushMessage(note);
+                    else turn.pendingNotes.push(note);
+                    scrollToBottom();
+                    break;
+                }
+                case 'done':
+                    turn.final = data as ChatResponse;
+                    break;
+                case 'error':
+                    turn.error = (data as { message?: string }).message ?? 'Erreur du patient simulé';
+                    break;
+            }
+        });
+        
+        // Échec ou flux coupé : rien n'a été enregistré, on retire la réponse partielle
+        if (turn.error || !turn.final) {
+            messages.value = messages.value.filter(m => !turn.addedIds.includes(m.id));
+            throw new Error(turn.error ?? 'La connexion a été interrompue avant la fin de la réponse');
+        }
         
         // ===== MESSAGE BLOQUÉ PAR LES GARDE-FOUS =====
         // Le message n'entre pas dans le transcript : on le marque comme non transmis
         // et on affiche l'avertissement comme message système (hors personnage).
-        if (chatResponse.blocked) {
+        if (turn.final.blocked) {
             const sent = messages.value.find(m => m.id === studentMessage.id);
             if (sent) sent.blocked = true;
-            messages.value.push({
+            pushMessage({
                 id: crypto.randomUUID(),
                 role: 'system',
-                content: chatResponse.patient_reply,
+                content: turn.final.patient_reply,
                 created_at: new Date().toISOString()
             });
             await scrollToBottom();
             return;
         }
         
-        // ===== AJOUTER LA RÉPONSE DU PATIENT =====
-        const patientMessage: ChatMessage = {
-            id: crypto.randomUUID(), // ID unique pour la réponse
-            role: 'patient',
-            content: chatResponse.patient_reply,
-            created_at: new Date().toISOString()
-        };
-        
-        messages.value.push(patientMessage);
-        
-        // ===== NOTES DE L'EXAMINATEUR (examen clinique, documents) =====
-        for (const note of chatResponse.examiner_notes ?? []) {
-            messages.value.push(examinerNoteToMessage(note));
-        }
+        // ===== RÉPONSE DU PATIENT : texte de référence tel qu'enregistré =====
+        ensurePatientBubble().content = turn.final.patient_reply;
         await scrollToBottom();
         
     } catch (error) {

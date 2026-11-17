@@ -1,16 +1,20 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from httpx import get
 from sqlmodel import Session, select
 from datetime import datetime, timedelta
 from uuid import UUID
-from db import get_session
+from dataclasses import dataclass, field
+from typing import Any, AsyncIterator, Callable, ContextManager
+from db import engine, get_session
+import json
 import os
 from models import Attachment, ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, ExaminerNoteOut, ModerationEvent, StationType, User
 from ai_chat_utils import generate_patient_reply
 from vllm_chat_utils import get_chat_completion_vllm, classify_student_message_vllm_arbiter, ArbiterOutput
-from patient_agent import AgentEvent, CaseToolContext, PatientAgentResult, run_patient_agent
+from patient_agent import AgentEvent, CaseToolContext, DocumentRef, PatientAgentResult, StreamItem, stream_patient_agent
 from attachment_routes import find_matching_attachments
-from contextlib import suppress
+from contextlib import aclosing, contextmanager, nullcontext
 import logging 
 import asyncio
 from auth import check_authorization 
@@ -200,6 +204,15 @@ def get_time_remaining(
 
 
 # ==================== CHAT : AGENT PATIENT + GARDE-FOUS ====================
+#
+# Un tour de chat est orchestré par `_run_turn`, partagé par deux routes :
+#   POST /chat/attempts/{id}/chat         -> réponse JSON complète (CLI, anciens clients)
+#   POST /chat/attempts/{id}/chat/stream  -> flux SSE (frontend, future voix)
+#
+# L'arbitre et le patient tournent en parallèle. Le texte du patient est mis en
+# TAMPON tant que l'arbitre n'a pas rendu son verdict : rien n'est envoyé à
+# l'étudiant avant validation. Une fois le message validé, le tampon est vidé
+# puis le texte est relayé au fil de la génération.
 
 EXAMINER_FINDING_PREFIX = "Examen clinique – "
 EXAMINER_DOCUMENT_PREFIX = "Document affiché – "
@@ -207,6 +220,9 @@ EXAMINER_DOCUMENT_PREFIX = "Document affiché – "
 # Tons/catégories de l'arbitre qui, sans bloquer le message, sont tracés
 FLAGGED_TONES = {"AGGRESSIVE", "INSULTING"}
 FLAGGED_CATEGORIES = {"OFF_TOPIC"}
+
+PATIENT_ERROR_MESSAGE = "Le patient simulé n'a pas pu répondre. Réessayez dans quelques secondes."
+ARBITER_ERROR_MESSAGE = "Erreur lors de l'arbitrage du message étudiant"
 
 
 def _use_patient_agent() -> bool:
@@ -239,37 +255,32 @@ def _station_state(rows: list[Message]) -> list[str]:
     return state
 
 
-async def _generate_legacy(patient_prompt: str, history: list[dict], student_message: str, keyword_docs: list) -> PatientAgentResult:
-    """Ancien fonctionnement (Gemini ou agent désactivé) : pas d'outils, documents par mots-clés."""
-    reply = await asyncio.to_thread(
-        generate_patient_reply,
-        patient_prompt=patient_prompt,
-        history=history,
-        student_message=student_message,
-    )
-    return PatientAgentResult(
-        reply=reply,
-        events=[AgentEvent("document", {"document": doc}) for doc in keyword_docs],
-    )
+@contextmanager
+def _write_session():
+    """Session dédiée aux écritures de fin de flux SSE.
+
+    Depuis FastAPI 0.106, la session injectée par Depends(get_session) est
+    fermée AVANT l'envoi d'une StreamingResponse : le flux ouvre la sienne.
+    """
+    with Session(engine) as s:
+        yield s
 
 
-def _keyword_documents(ctx: CaseToolContext, student_message: str, case_id: int, session: Session) -> list:
-    try:
-        matched = find_matching_attachments(student_message, case_id, session)
-    except Exception:
-        logger.exception("Erreur lors de la détection des documents par mots-clés")
-        return []
-    matched_ids = {str(a.id) for a in matched}
-    return [d for d in ctx.documents if d.attachment_id in matched_ids]
+@dataclass
+class _Turn:
+    """Tout ce qu'il faut pour un tour, lu en base AVANT de lancer les tâches concurrentes."""
+    attempt_id: UUID
+    message: str
+    patient_prompt: str
+    history: list[dict]
+    station_state: list[str]
+    ctx: CaseToolContext
+    use_agent: bool
+    keyword_docs: list[DocumentRef] = field(default_factory=list)
 
 
-@router.post("/attempts/{attempt_id}/chat", response_model=ChatOut)
-async def chat(
-    attempt_id: UUID, 
-    payload: ChatIn, 
-    session: Session = Depends(get_session), 
-    user: User = Depends(check_authorization())):
-    
+def _prepare_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: User) -> _Turn:
+    """Validations (erreurs HTTP classiques, avant tout flux) et lecture du contexte."""
     attempt = session.get(Attempts, attempt_id)
     
     if not attempt or attempt.user_id != user.id:
@@ -315,7 +326,6 @@ async def chat(
     if not case.patient_prompt:
         raise HTTPException(500, "Station configurée sans patient_prompt")
 
-    # 1) Charger l'historique
     stmt = select(Message).where(Message.attempt_id == attempt_id).order_by(Message.created_at)
     history_rows = session.exec(stmt).all()
     history = [
@@ -324,115 +334,132 @@ async def chat(
         if r.role in (ChatRole.student, ChatRole.patient)
     ]
 
-    # Tout ce qui touche la base est lu AVANT de lancer les tâches concurrentes
     ctx = CaseToolContext.from_case(case)
-    attachment_names = [d.display_name for d in ctx.documents]
+    use_agent = _use_patient_agent()
+    return _Turn(
+        attempt_id=attempt_id,
+        message=payload.message,
+        patient_prompt=case.patient_prompt,
+        history=history,
+        station_state=_station_state(history_rows),
+        ctx=ctx,
+        use_agent=use_agent,
+        keyword_docs=[] if use_agent else _keyword_documents(ctx, payload.message, case.id, session),
+    )
 
-    # 2) Arbitre et patient EN PARALLÈLE : la latence est max(arbitre, patient)
-    #    au lieu de leur somme. La réponse du patient n'est libérée qu'après le
-    #    verdict de l'arbitre ; les outils n'ont aucun effet de bord avant ce point.
-    if _use_patient_agent():
-        patient_task = asyncio.create_task(run_patient_agent(
-            patient_prompt=case.patient_prompt,
-            history=history,
-            student_message=payload.message,
-            ctx=ctx,
-            station_state=_station_state(history_rows),
-        ))
-    else:
-        keyword_docs = _keyword_documents(ctx, payload.message, case.id, session)
-        patient_task = asyncio.create_task(
-            _generate_legacy(case.patient_prompt, history, payload.message, keyword_docs)
-        )
 
+def _keyword_documents(ctx: CaseToolContext, student_message: str, case_id: int, session: Session) -> list[DocumentRef]:
     try:
-        arbiter = await asyncio.to_thread(
-            classify_student_message_vllm_arbiter, attachment_names, payload.message
+        matched = find_matching_attachments(student_message, case_id, session)
+    except Exception:
+        logger.exception("Erreur lors de la détection des documents par mots-clés")
+        return []
+    matched_ids = {str(a.id) for a in matched}
+    return [d for d in ctx.documents if d.attachment_id in matched_ids]
+
+
+def _patient_stream(turn: _Turn) -> AsyncIterator[StreamItem]:
+    if turn.use_agent:
+        return stream_patient_agent(
+            patient_prompt=turn.patient_prompt,
+            history=turn.history,
+            student_message=turn.message,
+            ctx=turn.ctx,
+            station_state=turn.station_state,
         )
-    except Exception:
-        patient_task.cancel()
-        raise
-    if not arbiter:
-        patient_task.cancel()
-        raise HTTPException(500, "Erreur lors de l'arbitrage du message étudiant")
+    return _legacy_stream(turn)
 
-    category = arbiter.get("category", "OTHER")
-    tone = arbiter.get("tone", "NEUTRAL")
 
-    # 3) Message refusé : on annule la génération, rien n'entre dans le transcript,
-    #    mais l'incident est tracé pour l'enseignant.
-    if not (arbiter.get("safety") or {}).get("allow_to_transcript", True):
-        patient_task.cancel()
-        with suppress(asyncio.CancelledError, Exception):
-            await patient_task
-        session.add(ModerationEvent(
-            attempt_id=attempt_id,
-            source="arbiter",
-            category=category,
-            severity=tone,
-            action="blocked",
-            detail=(arbiter.get("safety") or {}).get("redacted_text"),
-            student_message=payload.message,
-        ))
-        session.commit()
-        logger.info("⛔ Message bloqué par l'arbitre (%s/%s)", category, tone)
-        return ChatOut(patient_reply=_blocked_notice(arbiter), blocked=True)
+async def _legacy_stream(turn: _Turn) -> AsyncIterator[StreamItem]:
+    """Ancien fonctionnement (Gemini ou agent désactivé) : pas d'outils, pas de flux
+    token par token, documents détectés par mots-clés."""
+    reply = await asyncio.to_thread(
+        generate_patient_reply,
+        patient_prompt=turn.patient_prompt,
+        history=turn.history,
+        student_message=turn.message,
+    )
+    result = PatientAgentResult(reply=(reply or "").strip())
+    yield ("delta", result.reply)
+    for doc in turn.keyword_docs:
+        event = AgentEvent("document", {"document": doc})
+        result.events.append(event)
+        yield ("event", event)
+    yield ("done", result)
 
-    if category == "EXAM_REQUEST":
-        logger.info("L'étudiant a demandé un examen complémentaire : %s", arbiter.get("exam"))
 
-    # 4) Réponse du patient (avec outils éventuels)
-    try:
-        result = await patient_task
-    except Exception:
-        logger.exception("❌ Échec de la génération de la réponse patient")
-        raise HTTPException(502, "Le patient simulé n'a pas pu répondre. Réessayez dans quelques secondes.")
-    logger.info("Réponse patient générée: %s (outils: %s)", result.reply, result.tool_calls)
-
-    # 5) Persistance : étudiant -> patient -> notes de l'examinateur
-    t0 = datetime.now()
-    tick = iter(range(1, 1000))
-
-    def ts() -> datetime:
-        return t0 + timedelta(microseconds=next(tick))
-
-    student_msg = Message(attempt_id=attempt_id, role=ChatRole.student, content=payload.message, created_at=ts())
-    reply_msg = Message(attempt_id=attempt_id, role=ChatRole.patient, content=result.reply, created_at=ts())
-    session.add(student_msg)
-    session.add(reply_msg)
-
-    examiner_notes: list[ExaminerNoteOut] = []
-    for finding in result.findings:
-        label = finding.get("label", finding["id"])
-        session.add(Message(
-            attempt_id=attempt_id,
-            role=ChatRole.examiner,
-            content=f"{EXAMINER_FINDING_PREFIX}{label} : {finding['findings']}",
-            created_at=ts(),
-        ))
-        examiner_notes.append(ExaminerNoteOut(kind="exam_findings", title=label, content=finding["findings"]))
-
-    for doc in result.documents:
-        session.add(Message(
-            attempt_id=attempt_id,
-            role=ChatRole.examiner,
-            content=f"{EXAMINER_DOCUMENT_PREFIX}{doc.display_name}",
-            attachment_id=UUID(doc.attachment_id),
-            created_at=ts(),
-        ))
-        examiner_notes.append(ExaminerNoteOut(
+def _notes_for_event(event: AgentEvent) -> list[ExaminerNoteOut]:
+    if event.type == "exam_findings":
+        return [
+            ExaminerNoteOut(kind="exam_findings", title=f.get("label", f["id"]), content=f["findings"])
+            for f in event.payload["findings"]
+        ]
+    if event.type == "document":
+        doc: DocumentRef = event.payload["document"]
+        return [ExaminerNoteOut(
             kind="document",
             title=doc.display_name,
             content=f"L'examinateur vous montre : {doc.display_name}",
             attachment_id=doc.attachment_id,
             file_url=f"/attachments/download/{doc.attachment_id}",
             mime_type=doc.mime_type,
-        ))
+        )]
+    return []  # les signalements sont invisibles pour l'étudiant
+
+
+def _persist_blocked(session: Session, turn: _Turn, arbiter: dict) -> None:
+    session.add(ModerationEvent(
+        attempt_id=turn.attempt_id,
+        source="arbiter",
+        category=arbiter.get("category", "OTHER"),
+        severity=arbiter.get("tone", "NEUTRAL"),
+        action="blocked",
+        detail=(arbiter.get("safety") or {}).get("redacted_text"),
+        student_message=turn.message,
+    ))
+    session.commit()
+
+
+def _persist_exchange(session: Session, turn: _Turn, result: PatientAgentResult, arbiter: dict) -> ChatOut:
+    """Étudiant -> patient -> notes de l'examinateur (dans l'ordre des outils) -> signalements."""
+    t0 = datetime.now()
+    tick = iter(range(1, 1000))
+
+    def ts() -> datetime:
+        return t0 + timedelta(microseconds=next(tick))
+
+    student_msg = Message(attempt_id=turn.attempt_id, role=ChatRole.student, content=turn.message, created_at=ts())
+    session.add(student_msg)
+    session.add(Message(attempt_id=turn.attempt_id, role=ChatRole.patient, content=result.reply, created_at=ts()))
+
+    examiner_notes: list[ExaminerNoteOut] = []
+    for event in result.events:
+        if event.type == "exam_findings":
+            for finding in event.payload["findings"]:
+                label = finding.get("label", finding["id"])
+                session.add(Message(
+                    attempt_id=turn.attempt_id,
+                    role=ChatRole.examiner,
+                    content=f"{EXAMINER_FINDING_PREFIX}{label} : {finding['findings']}",
+                    created_at=ts(),
+                ))
+        elif event.type == "document":
+            doc: DocumentRef = event.payload["document"]
+            session.add(Message(
+                attempt_id=turn.attempt_id,
+                role=ChatRole.examiner,
+                content=f"{EXAMINER_DOCUMENT_PREFIX}{doc.display_name}",
+                attachment_id=UUID(doc.attachment_id),
+                created_at=ts(),
+            ))
+        examiner_notes.extend(_notes_for_event(event))
 
     # Signalements : arbitre (ton agressif, hors sujet accepté) + patient (outil)
+    category = arbiter.get("category", "OTHER")
+    tone = arbiter.get("tone", "NEUTRAL")
     if tone in FLAGGED_TONES or category in FLAGGED_CATEGORIES:
         session.add(ModerationEvent(
-            attempt_id=attempt_id,
+            attempt_id=turn.attempt_id,
             message_id=student_msg.id,
             source="arbiter",
             category=category,
@@ -441,7 +468,7 @@ async def chat(
         ))
     for flag in result.flags:
         session.add(ModerationEvent(
-            attempt_id=attempt_id,
+            attempt_id=turn.attempt_id,
             message_id=student_msg.id,
             source="patient_agent",
             category=flag["category"],
@@ -452,12 +479,145 @@ async def chat(
 
     session.commit()
 
-    attachment_ids = [d.attachment_id for d in result.documents] or None
     return ChatOut(
         patient_reply=result.reply,
-        attachments=attachment_ids,
+        attachments=[d.attachment_id for d in result.documents] or None,
         examiner_notes=examiner_notes,
     )
+
+
+async def _run_turn(turn: _Turn, write_session: Callable[[], ContextManager[Session]]) -> AsyncIterator[tuple[str, Any]]:
+    """Orchestre un tour. Produit, dans l'ordre :
+        ("delta", str)                      texte du patient (seulement après validation)
+        ("examiner_note", ExaminerNoteOut)  résultat d'outil visible par l'étudiant
+        ("done", ChatOut)                   fin du tour, après persistance (bloqué ou non)
+      ou ("error", (status_http, message))  rien n'est enregistré
+    """
+    buffer: asyncio.Queue = asyncio.Queue()
+
+    async def pump() -> None:
+        try:
+            async for item in _patient_stream(turn):
+                await buffer.put(item)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("❌ Échec de la génération de la réponse patient")
+            await buffer.put(("error", None))
+
+    patient_task = asyncio.create_task(pump())
+    try:
+        try:
+            arbiter = await asyncio.to_thread(
+                classify_student_message_vllm_arbiter,
+                [d.display_name for d in turn.ctx.documents],
+                turn.message,
+            )
+        except Exception:
+            logger.exception("❌ Échec de l'arbitrage")
+            arbiter = None
+        if not arbiter:
+            yield ("error", (500, ARBITER_ERROR_MESSAGE))
+            return
+
+        category = arbiter.get("category", "OTHER")
+
+        # Message refusé : génération annulée, rien dans le transcript, incident tracé
+        if not (arbiter.get("safety") or {}).get("allow_to_transcript", True):
+            patient_task.cancel()
+            await asyncio.wait([patient_task])
+            with write_session() as s:
+                _persist_blocked(s, turn, arbiter)
+            logger.info("⛔ Message bloqué par l'arbitre (%s/%s)", category, arbiter.get("tone"))
+            yield ("done", ChatOut(patient_reply=_blocked_notice(arbiter), blocked=True))
+            return
+
+        if category == "EXAM_REQUEST":
+            logger.info("L'étudiant a demandé un examen complémentaire : %s", arbiter.get("exam"))
+
+        # Message validé : on vide le tampon puis on relaie au fil de l'eau
+        while True:
+            kind, value = await buffer.get()
+            if kind == "delta":
+                yield ("delta", value)
+            elif kind == "event":
+                for note in _notes_for_event(value):
+                    yield ("examiner_note", note)
+            elif kind == "error":
+                yield ("error", (502, PATIENT_ERROR_MESSAGE))
+                return
+            elif kind == "done":
+                logger.info("Réponse patient générée: %s (outils: %s)", value.reply, value.tool_calls)
+                with write_session() as s:
+                    out = _persist_exchange(s, turn, value, arbiter)
+                yield ("done", out)
+                return
+    finally:
+        # Déconnexion du client, erreur ou blocage : on n'attend pas la génération
+        if not patient_task.done():
+            patient_task.cancel()
+
+
+@router.post("/attempts/{attempt_id}/chat", response_model=ChatOut)
+async def chat(
+    attempt_id: UUID, 
+    payload: ChatIn, 
+    session: Session = Depends(get_session), 
+    user: User = Depends(check_authorization())):
+    """Tour de chat, réponse JSON complète."""
+    turn = _prepare_turn(attempt_id, payload, session, user)
+    async with aclosing(_run_turn(turn, lambda: nullcontext(session))) as events:
+        async for kind, value in events:
+            if kind == "error":
+                status_code, message = value
+                raise HTTPException(status_code, message)
+            if kind == "done":
+                return value
+    raise HTTPException(500, "Tour de chat interrompu")
+
+
+def _sse(event: str, data: Any) -> str:
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@router.post("/attempts/{attempt_id}/chat/stream")
+async def chat_stream(
+    attempt_id: UUID,
+    payload: ChatIn,
+    session: Session = Depends(get_session),
+    user: User = Depends(check_authorization())):
+    """Tour de chat en flux SSE (text/event-stream).
+
+    Événements :
+      delta          {"text": "..."}               morceau de la réplique du patient
+      examiner_note  ExaminerNoteOut               résultat d'examen / document affiché
+      done           ChatOut                       fin du tour (blocked=true si refusé)
+      error          {"status": 502, "message": ""} échec, rien n'est enregistré
+
+    Les erreurs de validation (404, 400, 408...) restent des réponses HTTP classiques.
+    Si le client se déconnecte avant "done", la génération est annulée et rien n'est enregistré.
+    """
+    turn = _prepare_turn(attempt_id, payload, session, user)
+
+    async def event_source():
+        async with aclosing(_run_turn(turn, _write_session)) as events:
+            async for kind, value in events:
+                if kind == "delta":
+                    yield _sse("delta", {"text": value})
+                elif kind == "examiner_note":
+                    yield _sse("examiner_note", value.model_dump())
+                elif kind == "done":
+                    yield _sse("done", value.model_dump())
+                elif kind == "error":
+                    status_code, message = value
+                    yield _sse("error", {"status": status_code, "message": message})
+
+    return StreamingResponse(
+        event_source(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
 
 @router.post("/attempts/{attempt_id}/finalize")
 def finalize_attempt(attempt_id: UUID, session: Session = Depends(get_session), user: User = Depends(check_authorization())):

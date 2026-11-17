@@ -7,12 +7,14 @@ import pytest
 from conftest import FakeAsyncClient, completion, tool_call
 from patient_agent import (
     FALLBACK_REPLY,
+    _TagFilter,
     CaseToolContext,
     build_agent_system_instruction,
     build_tools,
     clean_reply,
     execute_tool,
     run_patient_agent,
+    stream_patient_agent,
 )
 
 FINDINGS = [
@@ -188,51 +190,111 @@ async def test_no_thinking_kwargs_for_non_qwen3_models(ctx):
     assert "extra_body" not in client.requests[0]
 
 
-# ---------- Bout en bout avec le vrai SDK OpenAI (serveur vLLM simulé) ----------
+# ---------- Flux ----------
+
+@pytest.mark.parametrize("pieces,expected", [
+    (["<thi", "nk>je réfléchis</th", "ink>Bon", "jour."], "Bonjour."),
+    (["Oui <tool", "_call>{\"name\": \"x\"}</tool_", "call>docteur."], "Oui docteur."),
+    (["La douleur est < 5 ", "sur 10."], "La douleur est < 5 sur 10."),
+    (["J'ai mal <"], "J'ai mal <"),
+])
+def test_tag_filter_across_chunk_boundaries(pieces, expected):
+    f = _TagFilter()
+    out = "".join(f.feed(p) for p in pieces) + f.flush()
+    assert out == expected
+
+
+@pytest.mark.asyncio
+async def test_stream_yields_small_deltas_then_done(ctx):
+    client = FakeAsyncClient([completion("<think></think>J'ai très mal, docteur.")], chunk_size=3)
+    items = [i async for i in stream_patient_agent(
+        patient_prompt="P", history=[], student_message="Où ?", ctx=ctx, client=client, model="Qwen/Qwen3-8B")]
+    deltas = [v for k, v in items if k == "delta"]
+    assert len(deltas) > 3
+    assert "".join(deltas) == "J'ai très mal, docteur."
+    assert items[-1][0] == "done" and items[-1][1].reply == "J'ai très mal, docteur."
+
+
+@pytest.mark.asyncio
+async def test_text_before_and_after_tool_forms_one_reply(ctx):
+    client = FakeAsyncClient([
+        completion("D'accord.", [tool_call("afficher_document", '{"document": "doc_1"}')]),
+        completion("C'est grave ?"),
+    ])
+    items = [i async for i in stream_patient_agent(
+        patient_prompt="P", history=[], student_message="ECG", ctx=ctx, client=client, model="m")]
+    kinds = [k for k, _ in items]
+    # le texte du 1er tour, puis l'outil, puis le texte du 2e tour
+    assert kinds.index("event") > kinds.index("delta")
+    assert "".join(v for k, v in items if k == "delta") == "D'accord. C'est grave ?"
+    assert items[-1][1].reply == "D'accord. C'est grave ?"
+    # l'historique renvoyé au modèle contient le texte déjà prononcé
+    assert client.requests[1]["messages"][-2]["content"] == "D'accord."
+
+
+# ---------- Bout en bout avec le vrai SDK OpenAI (serveur vLLM simulé, SSE) ----------
+
+def _sse_body(deltas, finish_reason):
+    """Corps SSE au format de vLLM : un événement data par morceau, puis [DONE]."""
+    lines = []
+    for i, delta in enumerate(deltas + [{}]):
+        chunk = {
+            "id": "chatcmpl-1", "object": "chat.completion.chunk", "created": 0, "model": "Qwen/Qwen3-8B",
+            "choices": [{"index": 0, "delta": delta,
+                         "finish_reason": finish_reason if i == len(deltas) else None}],
+        }
+        lines.append("data: " + json.dumps(chunk, ensure_ascii=False) + "\n\n")
+    lines.append("data: [DONE]\n\n")
+    return "".join(lines).encode()
+
 
 @pytest.mark.asyncio
 async def test_real_openai_sdk_wire_format(ctx):
-    """Vérifie la sérialisation réelle (tools, tool_calls, messages role=tool) via HTTP."""
+    """Sérialisation réelle (stream, tools, tool_calls en morceaux, role=tool) via HTTP."""
     import httpx
     from openai import AsyncOpenAI
 
     bodies = []
 
-    def vllm_response(message, finish_reason):
-        return {
-            "id": "chatcmpl-1", "object": "chat.completion", "created": 0, "model": "Qwen/Qwen3-8B",
-            "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-        }
-
     def handler(request: httpx.Request) -> httpx.Response:
         body = json.loads(request.content)
         bodies.append(body)
         if len(bodies) == 1:
-            return httpx.Response(200, json=vllm_response({
-                "role": "assistant", "content": None,
-                "tool_calls": [{"id": "chatcmpl-tool-1", "type": "function", "function": {
-                    "name": "resultat_examen_clinique", "arguments": "{\"zones\": [\"constantes\"]}"}}],
-            }, "tool_calls"))
-        return httpx.Response(200, json=vllm_response({"role": "assistant", "content": "D'accord, allez-y."}, "stop"))
+            deltas = [
+                {"role": "assistant", "content": ""},
+                {"tool_calls": [{"index": 0, "id": "chatcmpl-tool-1", "type": "function",
+                                 "function": {"name": "resultat_examen_clinique", "arguments": ""}}]},
+                {"tool_calls": [{"index": 0, "function": {"arguments": "{\"zones\": [\"const"}}]},
+                {"tool_calls": [{"index": 0, "function": {"arguments": "antes\"]}"}}]},
+            ]
+            content = _sse_body(deltas, "tool_calls")
+        else:
+            deltas = [{"role": "assistant", "content": ""}, {"content": "D'accord,"}, {"content": " allez-y."}]
+            content = _sse_body(deltas, "stop")
+        return httpx.Response(200, content=content, headers={"content-type": "text/event-stream"})
 
     client = AsyncOpenAI(base_url="http://vllm.test/v1", api_key="x",
                          http_client=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-    result = await run_patient_agent(
+    items = [item async for item in stream_patient_agent(
         patient_prompt="Tu es Mr. Dupont.", history=[], student_message="Je prends votre tension.",
         ctx=ctx, client=client, model="Qwen/Qwen3-8B",
-    )
+    )]
 
+    kinds = [k for k, _ in items]
+    assert kinds == ["event", "delta", "delta", "done"]
+    result = items[-1][1]
     assert result.reply == "D'accord, allez-y."
     assert [f["id"] for f in result.findings] == ["constantes"]
+
     first, second = bodies
+    assert first["stream"] is True
     assert first["tool_choice"] == "auto"
     assert first["chat_template_kwargs"] == {"enable_thinking": False}  # extra_body fusionné au corps
     assert {t["function"]["name"] for t in first["tools"]} == {
         "afficher_document", "resultat_examen_clinique", "signaler_hors_cadre"}
-    assert second["messages"][-2]["tool_calls"][0]["id"] == "chatcmpl-tool-1"
-    assert second["messages"][-1] == {
-        "role": "tool", "tool_call_id": "chatcmpl-tool-1",
-        "content": second["messages"][-1]["content"],
-    }
+    call = second["messages"][-2]["tool_calls"][0]
+    assert call["id"] == "chatcmpl-tool-1"
+    assert call["function"]["arguments"] == '{"zones": ["constantes"]}'  # morceaux recollés
+    assert second["messages"][-1]["role"] == "tool"
+    assert second["messages"][-1]["tool_call_id"] == "chatcmpl-tool-1"
     assert "158/94" not in json.dumps(second, ensure_ascii=False)

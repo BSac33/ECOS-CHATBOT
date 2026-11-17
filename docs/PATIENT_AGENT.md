@@ -8,7 +8,9 @@ du patient). Le patient reste dans son personnage, et l'examinateur transmet les
 informations objectives à l'étudiant.
 
 Module : `backend_ecos_chatbot/app/patient_agent.py`
-Route : `POST /chat/attempts/{id}/chat` (`chat_routes.py`)
+Routes (`chat_routes.py`), qui partagent la même orchestration :
+- `POST /chat/attempts/{id}/chat/stream` : réponse en flux **SSE**, utilisée par le frontend
+- `POST /chat/attempts/{id}/chat` : réponse JSON complète, utilisée par la CLI et les anciens clients
 
 ## Outils disponibles
 
@@ -37,16 +39,59 @@ pas d'examen clinique renseigné) n'est pas proposé au modèle.
 ```
 message étudiant
    ├──► arbitre (Qwen 3B, JSON contraint)  ─┐   en PARALLÈLE :
-   └──► agent patient (Qwen3-8B + outils) ──┤   latence = max(arbitre, patient)
-                                            ▼
+   └──► agent patient (Qwen3-8B + outils) ──┤   le texte du patient est mis en TAMPON
+                                            ▼   tant que l'arbitre n'a pas tranché
                     verdict de l'arbitre
           ┌─────────────────┴─────────────────┐
      bloqué                                  accepté
-     - génération patient annulée            - messages étudiant + patient
-     - rien dans le transcript               - messages "examiner" (résultats, documents)
-     - moderation_event "blocked"            - moderation_events "flagged" (outil patient,
-     - ChatOut.blocked = true                  ton agressif ou hors sujet selon l'arbitre)
+     - génération patient annulée            - tampon vidé, puis texte relayé en direct
+     - aucun texte du patient envoyé         - à la fin : messages étudiant + patient,
+     - rien dans le transcript                 messages "examiner", moderation_events
+     - moderation_event "blocked"              "flagged" (outil patient, ton agressif
+     - ChatOut.blocked = true                  ou hors sujet selon l'arbitre)
 ```
+
+Le temps avant le premier mot est donc max(arbitre, premier token du patient). Il n'y a
+**aucun** risque qu'un morceau de réponse parte avant la validation du message.
+
+## Flux SSE (`/chat/stream`)
+
+Réponse `text/event-stream`, un JSON par événement :
+
+| Événement | Données | Quand |
+|---|---|---|
+| `delta` | `{"text": "Ça a commencé "}` | morceau de la réplique du patient |
+| `examiner_note` | `ExaminerNoteOut` | résultat d'outil visible (examen clinique, document) |
+| `done` | `ChatOut` complet | toujours en dernier, **après** l'enregistrement en base (`blocked: true` si refusé) |
+| `error` | `{"status": 502, "message": "..."}` | échec : rien n'est enregistré |
+
+```
+event: delta
+data: {"text": "D'accord, "}
+
+event: examiner_note
+data: {"kind": "exam_findings", "title": "Constantes vitales", "content": "PA 158/94 mmHg ..."}
+
+event: done
+data: {"patient_reply": "D'accord, allez-y.", "blocked": false, "attachments": null, "examiner_notes": [...]}
+```
+
+- Les erreurs de validation (tentative inconnue 404, terminée 400, temps écoulé 408)
+  restent des **réponses HTTP classiques**, renvoyées avant l'ouverture du flux.
+- Si le client se déconnecte avant `done`, la génération vLLM est annulée et **rien n'est
+  enregistré** (comme une erreur). C'est la base de la future interruption du patient en mode vocal.
+- Le texte de `done.patient_reply` est la référence (ce qui est en base) ; le frontend
+  remplace la bulle par ce texte à la fin.
+- Si le modèle parle avant d'appeler un outil puis reprend après, les deux morceaux forment
+  une seule réplique.
+- Les blocs `<think>` et les balises `<tool_call>` sont filtrés **au fil du flux**, même
+  quand une balise est coupée entre deux morceaux.
+- Depuis FastAPI 0.106, la session injectée par `Depends(get_session)` est fermée avant
+  l'envoi d'une `StreamingResponse` : le flux ouvre sa propre session pour écrire en fin de tour.
+- Derrière nginx : la réponse porte `X-Accel-Buffering: no` (pas de mise en tampon par le proxy).
+
+Côté frontend : `frontend/src/services/sse.ts` lit le flux via `fetch`, car `EventSource`
+ne gère pas le POST. `ChatView.vue` crée la bulle du patient au premier `delta`.
 
 ## Format de réponse (`ChatOut`)
 
@@ -120,7 +165,7 @@ TEST_DATABASE_URL=postgresql://... pytest tests/test_chat_route.py   # sur une b
 
 ## Suite prévue
 
-- Réponse en streaming (SSE), indispensable pour la synthèse vocale phrase par phrase
+- Découpage du flux en phrases pour la synthèse vocale (le SSE est en place)
 - Gradation des sanctions à partir de `moderation_events` (3 incidents → fin de station)
 - Contrôle des phrases du patient avant envoi (termes interdits propres au cas)
 - Mode vocal : reconnaissance et synthèse vocales Kyutai (« appuyer pour parler », puis conversation continue)

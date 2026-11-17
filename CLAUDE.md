@@ -153,9 +153,11 @@ Body: {"case_id": 1}
 
 **2. Chat (for patient_interview stations only)**
 ```
-POST /chat/attempts/{id}/chat
+POST /chat/attempts/{id}/chat/stream   (SSE: delta / examiner_note / done / error — used by the frontend)
+POST /chat/attempts/{id}/chat          (same orchestration, full JSON response — used by the CLI)
 Body: {"message": "Bonjour, que puis-je faire pour vous?"}
-→ Arbiter (vLLM 3B) and patient agent run IN PARALLEL
+→ Arbiter (vLLM 3B) and patient agent run IN PARALLEL; patient text is buffered
+  until the arbiter verdict, then streamed (shared `_run_turn` in chat_routes.py)
 → If arbiter blocks: patient generation cancelled, nothing stored in transcript,
   moderation_events row (action="blocked"), ChatOut.blocked=true
 → Else saves student + patient messages, plus "examiner" messages for tool results
