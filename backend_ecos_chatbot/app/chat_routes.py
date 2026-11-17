@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator, Callable, ContextManager
 from db import engine, get_session
 import json
 import os
-from models import Attachment, ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, ExaminerNoteOut, ModerationEvent, StationType, User
+from models import Attachment, CaseVersion, ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, ExaminerNoteOut, ModerationEvent, StationType, User, UserRole
 from ai_chat_utils import generate_patient_reply
 from vllm_chat_utils import get_chat_completion_vllm
 from arbiter import Verdict, arbitrate, prefilter
@@ -87,14 +87,22 @@ async def create_attempt(
     
     if not case:
         raise HTTPException(404, "Clinical case not found")
+    # Un brouillon n'est jouable que par les enseignants (test : /authoring/cases/{id}/test)
+    if case.status != "published" and user.role == UserRole.student:
+        raise HTTPException(404, "Clinical case not found")
     
     logger.info(f"⏱️ Durée du cas: {case.duration_seconds} secondes")
     logger.info(f"case found: {case.title}")
 
     attempt = Attempts(user_id=user.id, case_id=payload.case_id, created_at=datetime.utcnow(), is_completed=False)
+
+    # Version publiée en vigueur : c'est elle qui sera jouée et corrigée
+    version = latest_published_version(session, case.id)
+    attempt.case_version_id = version.id if version else None
+    duration = version.duration_seconds if version else case.duration_seconds
     
     # Calculer l'heure de fin basée sur la durée du cas
-    attempt.expires_at = attempt.created_at + timedelta(seconds=case.duration_seconds)
+    attempt.expires_at = attempt.created_at + timedelta(seconds=duration)
     
     session.add(attempt)
     session.commit()
@@ -104,7 +112,7 @@ async def create_attempt(
     instruction_msg = Message(
         attempt_id=attempt.id,
         role=ChatRole.system,
-        content=case.student_instructions,
+        content=version.student_instructions if version else case.student_instructions,
         created_at=datetime.utcnow()
     )
     session.add(instruction_msg)
@@ -158,11 +166,13 @@ def get_case_info(attempt_id: UUID, session: Session = Depends(get_session), use
     if not case:
         raise HTTPException(500, "Case not found")
     
+    version = attempt_version(session, attempt)
     return {
         "case_id": case.id,
-        "title": case.title,
+        "title": version.title if version else case.title,
         "station_type": case.station_type,
-        "duration_seconds": case.duration_seconds
+        "duration_seconds": version.duration_seconds if version else case.duration_seconds,
+        "is_test": attempt.is_test,
     }
 
 
@@ -259,6 +269,17 @@ def _spoken(message: Message) -> str:
     return message.spoken_content if message.spoken_content is not None else message.content
 
 
+def latest_published_version(session: Session, case_id: int):
+    stmt = (select(CaseVersion)
+            .where(CaseVersion.case_id == case_id, CaseVersion.status == "published")
+            .order_by(CaseVersion.version.desc()))
+    return session.exec(stmt).first()
+
+
+def attempt_version(session: Session, attempt: Attempts):
+    return session.get(CaseVersion, attempt.case_version_id) if attempt.case_version_id else None
+
+
 @contextmanager
 def _write_session():
     """Session dédiée aux écritures de fin de flux SSE.
@@ -329,7 +350,10 @@ def _prepare_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: Use
             "L'étudiant doit soumettre sa réponse complète puis demander l'évaluation via /attempts/{id}/evaluate"
         )
     
-    if not case.patient_prompt:
+    # Version jouée (publiée, ou brouillon testé par un enseignant)
+    version = attempt_version(session, attempt)
+    patient_prompt = version.patient_prompt if version else case.patient_prompt
+    if not patient_prompt:
         raise HTTPException(500, "Station configurée sans patient_prompt")
 
     stmt = select(Message).where(Message.attempt_id == attempt_id).order_by(Message.created_at)
@@ -341,18 +365,21 @@ def _prepare_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: Use
     ]
 
     ctx = CaseToolContext.from_case(case)
+    if version is not None:
+        ctx.exam_findings = [f for f in (version.exam_findings or [])
+                             if isinstance(f, dict) and f.get("id") and f.get("findings")]
     use_agent = _use_patient_agent()
     return _Turn(
         attempt_id=attempt_id,
         message=payload.message,
-        patient_prompt=case.patient_prompt,
+        patient_prompt=patient_prompt,
         history=history,
         station_state=_station_state(history_rows),
         ctx=ctx,
         use_agent=use_agent,
         keyword_docs=[] if use_agent else _keyword_documents(ctx, payload.message, case.id, session),
         modality=modality,
-        voice_id=case.voice_id,
+        voice_id=version.voice_id if version else case.voice_id,
     )
 
 

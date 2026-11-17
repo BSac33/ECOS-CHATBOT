@@ -12,6 +12,7 @@ from uuid import UUID
 from datetime import datetime
 from db import get_session
 from models import (
+    CaseVersion,
     ClinicalCase, 
     Attempts, 
     Message, 
@@ -114,18 +115,28 @@ def evaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_s
     if not case:
         raise HTTPException(500, "Cas clinique introuvable (erreur d'intégrité)")
     
-    # Récupérer la grille d'évaluation
-    eval_grid_stmt = select(EvaluationGrid).where(
-        EvaluationGrid.case_id == case.id,
-        EvaluationGrid.is_active == True
-    )
-    eval_grid = session.exec(eval_grid_stmt).first()
-    
-    if not eval_grid:
-        raise HTTPException(
-            404, 
-            f"Aucune grille d'évaluation active pour le cas '{case.title}'"
+    # Grille et contexte : ceux de la version du cas qui a été jouée (une
+    # republication ne change pas la correction d'une tentative passée)
+    version = session.get(CaseVersion, attempt.case_version_id) if attempt.case_version_id else None
+    if version is not None:
+        grid_structure = {"items": version.grid_items, "version": float(version.version),
+                          "total_points": version.total_points}
+        title, instructions, scenario = version.title, version.student_instructions, version.scenario_context
+    else:
+        eval_grid_stmt = select(EvaluationGrid).where(
+            EvaluationGrid.case_id == case.id,
+            EvaluationGrid.is_active == True
         )
+        eval_grid = session.exec(eval_grid_stmt).first()
+        
+        if not eval_grid:
+            raise HTTPException(
+                404, 
+                f"Aucune grille d'évaluation active pour le cas '{case.title}'"
+            )
+        grid_structure = {"items": eval_grid.items, "version": eval_grid.version,
+                          "total_points": eval_grid.total_points}
+        title, instructions, scenario = case.title, case.student_instructions, case.scenario_context
     
     # Récupérer tous les messages de la tentative pour construire le transcript
     messages_stmt = select(Message).where(
@@ -146,25 +157,18 @@ def evaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_s
     
     # Préparer le contexte du cas
     case_context = f"""
-Titre: {case.title}
+Titre: {title}
 Type de station: {case.station_type.value}
 
 Consignes pour l'étudiant:
-{case.student_instructions}
+{instructions}
 
 Contexte du scénario:
-{case.scenario_context}
+{scenario}
 """
     
     # Appeler le LLM pour évaluer
     try:
-        # Convertir la liste d'items en un dict avec la structure attendue
-        grid_structure = {
-            "items": eval_grid.items,
-            "version": eval_grid.version,
-            "total_points": eval_grid.total_points
-        }
-        
         evaluation_result = evaluate_attempt_with_llm(
             transcript=transcript,
             evaluation_grid=grid_structure,
@@ -178,7 +182,7 @@ Contexte du scénario:
     
     # Calculer les points obtenus et possibles pour les analytics
     points_obtained = evaluation_result.get("total_score", 0.0)
-    points_possible = eval_grid.total_points
+    points_possible = grid_structure["total_points"]
     
     # Sauvegarder le résultat de l'évaluation dans la base de données
     # Créer une nouvelle évaluation

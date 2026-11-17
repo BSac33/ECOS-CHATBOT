@@ -297,6 +297,10 @@ class ClinicalCase(SQLModel, table=True):
     # Voix du patient en mode vocal : chemin relatif au dépôt Hugging Face kyutai/tts-voices
     # (ex. "cml-tts/fr/12977_10625_000037-0001.wav"). None = voix par défaut du serveur.
     voice_id: Optional[str] = None
+
+    # Fiche de cas structurée en cours d'édition (case_sheet.CaseSheet). Les champs
+    # d'exécution ci-dessus en sont compilés à chaque publication (voir case_versions).
+    sheet: Optional[dict] = Field(default=None, sa_column=Column(JSON, nullable=True))
     
     duration_seconds: int
     
@@ -364,6 +368,10 @@ class Attempts(SQLModel, table=True):
     completed_at: Optional[datetime] = None  # Timestamp de finalisation
     score: Optional[float] = None
     is_completed: bool = Field(default=False)
+    # Version du cas jouée (publiée, ou brouillon testé par un enseignant)
+    case_version_id: Optional[int] = Field(default=None, foreign_key="case_versions.id")
+    # Tentative de test d'un enseignant : exclue des statistiques
+    is_test: bool = Field(default=False)
     
 class Message(SQLModel, table=True):
     __tablename__ = "chat_messages"
@@ -384,6 +392,78 @@ class Message(SQLModel, table=True):
     spoken_content: Optional[str] = None
     
     
+class CaseVersion(SQLModel, table=True):
+    """Version figée d'un cas : ce qui a été joué et noté ne change plus.
+
+    status = "published" : version proposée aux étudiants (la plus récente fait foi)
+    status = "test"      : brouillon testé par un enseignant avant publication
+    """
+    __tablename__ = "case_versions"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    case_id: int = Field(foreign_key="clinical_cases.id", index=True)
+    version: int
+    status: str = Field(default="published", index=True)
+    sheet: dict = Field(sa_column=Column(JSON, nullable=False))
+    title: str
+    student_instructions: str
+    scenario_context: str
+    patient_prompt: str
+    duration_seconds: int
+    exam_findings: Optional[List[dict]] = Field(default=None, sa_column=Column(JSON, nullable=True))
+    grid_items: List[dict] = Field(default_factory=list, sa_column=Column(JSON, nullable=False))
+    total_points: float = 0
+    voice_id: Optional[str] = None
+    created_by: int = Field(foreign_key="users.id")
+    created_at: datetime = Field(default_factory=datetime.now)
+
+
+# ==================== CORPUS OFFICIEL (assistant de création de cas) ====================
+
+class CorpusSource(SQLModel, table=True):
+    """Source documentaire et ses droits d'usage."""
+    __tablename__ = "corpus_sources"
+
+    id: str = Field(primary_key=True)          # ex. "sfc-cardio-dfasm"
+    title: str
+    publisher: str
+    license_note: str                           # accord obtenu, conditions d'usage
+    homepage: Optional[str] = None
+    retrieved_at: Optional[datetime] = None
+
+
+class CorpusChunk(SQLModel, table=True):
+    """Passage d'un cours, rattaché à un item R2C, une section et un rang."""
+    __tablename__ = "corpus_chunks"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    source_id: str = Field(foreign_key="corpus_sources.id", index=True)
+    url: str
+    item_number: Optional[int] = Field(default=None, index=True)
+    chapter_title: str
+    section: str                                 # chemin des titres : « IV. Diagnostic > A. Présentation clinique »
+    rank: Optional[str] = None                   # "A" | "B" | "C"
+    kind: str = Field(default="cours", index=True)  # cours | objectif | points_cles | vignette
+    position: int = 0
+    text: str
+
+
+class StartingSituation(SQLModel, table=True):
+    """Situation de départ (SDD) des ECOS."""
+    __tablename__ = "starting_situations"
+
+    number: int = Field(primary_key=True)
+    title: str
+
+
+class ItemSituationLink(SQLModel, table=True):
+    """Situations de départ associées à un item R2C (d'après le corpus)."""
+    __tablename__ = "item_situation_links"
+
+    item_number: int = Field(primary_key=True)
+    situation_number: int = Field(primary_key=True)
+
+
 class ModerationEvent(SQLModel, table=True):
     """Trace des écarts de l'étudiant (insultes, hors sujet, tentative de triche...).
 

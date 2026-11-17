@@ -89,7 +89,7 @@ def get_user_attempts(
         )
         .join(ClinicalCase, Attempts.case_id == ClinicalCase.id)
         .outerjoin(Message, Message.attempt_id == Attempts.id)
-        .where(Attempts.user_id == user_id)
+        .where(Attempts.user_id == user_id, Attempts.is_test == False)
         .group_by(Attempts.id, ClinicalCase.title, ClinicalCase.station_type)
     )
     
@@ -135,7 +135,7 @@ def get_user_attempts(
             func.count(Attempts.id).filter(Attempts.is_completed == True).label("completed"),
             func.count(Attempts.id).filter(Attempts.is_completed == False).label("in_progress"),
         )
-        .where(Attempts.user_id == user_id)
+        .where(Attempts.user_id == user_id, Attempts.is_test == False)
     )
     
     stats_result = session.exec(stats_stmt).first()
@@ -147,14 +147,14 @@ def get_user_attempts(
     msg_stmt = (
         select(func.count(Message.id))
         .join(Attempts, Message.attempt_id == Attempts.id)
-        .where(Attempts.user_id == user_id)
+        .where(Attempts.user_id == user_id, Attempts.is_test == False)
     )
     total_messages = session.exec(msg_stmt).first() or 0
     
     # Cases uniques tentées
     cases_stmt = (
         select(Attempts.case_id)
-        .where(Attempts.user_id == user_id)
+        .where(Attempts.user_id == user_id, Attempts.is_test == False)
         .distinct()
     )
     cases_attempted = [case_id for case_id in session.exec(cases_stmt).all()]
@@ -276,7 +276,7 @@ def get_user_stats(
             func.count(Attempts.id).filter(Attempts.is_completed == True).label("completed"),
             func.count(Attempts.id).filter(Attempts.is_completed == False).label("in_progress"),
         )
-        .where(Attempts.user_id == user_id)
+        .where(Attempts.user_id == user_id, Attempts.is_test == False)
     )
     
     stats_result = session.exec(stats_stmt).first()
@@ -288,14 +288,14 @@ def get_user_stats(
     msg_stmt = (
         select(func.count(Message.id))
         .join(Attempts, Message.attempt_id == Attempts.id)
-        .where(Attempts.user_id == user_id)
+        .where(Attempts.user_id == user_id, Attempts.is_test == False)
     )
     total_messages = session.exec(msg_stmt).first() or 0
     
     # Cases uniques
     cases_stmt = (
         select(Attempts.case_id)
-        .where(Attempts.user_id == user_id)
+        .where(Attempts.user_id == user_id, Attempts.is_test == False)
         .distinct()
     )
     cases_attempted = [case_id for case_id in session.exec(cases_stmt).all()]

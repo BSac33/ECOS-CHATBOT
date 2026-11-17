@@ -19,6 +19,7 @@ from evaluation_routes import router as evaluation_router
 from user_routes import router as user_router
 from admin_routes import router as admin_router
 from case_routes import router as case_router
+from authoring_routes import router as authoring_router
 from auth import check_authorization, router as auth_router
 from pathlib import Path
 import logging
@@ -66,6 +67,7 @@ app.include_router(evaluation_router, prefix="/evaluation", tags=["evaluation"])
 app.include_router(user_router, prefix="/api/users", tags=["users"])
 app.include_router(case_router, prefix="/api/cases", tags=["cases"])
 app.include_router(admin_router, prefix="/admin", tags=["admin"])
+app.include_router(authoring_router, prefix="/authoring", tags=["authoring"])
 app.include_router(auth_router, prefix="/auth", tags=["auth"])
 
 # Servir les fichiers statiques (pour le stockage local)

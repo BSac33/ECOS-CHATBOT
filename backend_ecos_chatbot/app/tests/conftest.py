@@ -37,6 +37,8 @@ def session():
             outer.rollback()
         engine.dispose()
         return
+    import models  # noqa: F401  (enregistre toutes les tables dans la métadonnée)
+
     engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
     SQLModel.metadata.create_all(engine)
     with Session(engine) as s:

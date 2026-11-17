@@ -599,7 +599,8 @@ async def voice(websocket: WebSocket, attempt_id: UUID):
             await websocket.close(code=1008, reason="Tentative introuvable")
             return
         case = session.get(ClinicalCase, attempt.case_id)
-        voice_id = (case.voice_id if case else None) or default_voice()
+        version = chat_routes.attempt_version(session, attempt)
+        voice_id = (version.voice_id if version else (case.voice_id if case else None)) or default_voice()
 
     await websocket.accept()
     await VoiceConversation(websocket, attempt_id, user, voice_id).run()
