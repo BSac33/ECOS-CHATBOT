@@ -4,7 +4,10 @@
             <span v-if="message.role === 'examiner'" class="message-label">
                 <i class="pi pi-clipboard"></i> Examinateur
             </span>
-            <p class="message-content">{{ message.pending && !message.content ? 'Je vous écoute…' : message.content }}</p>
+            <p class="message-content">{{ displayedContent }}</p>
+            <span v-if="message.interrupted_by" class="message-cut" title="Vous avez coupé la parole au patient : seule la partie prononcée est affichée">
+                <i class="pi pi-exclamation-triangle"></i> Coupé avant la fin
+            </span>
             <template v-if="attachmentUrl">
                 <a v-if="isImage" :href="attachmentUrl" target="_blank" rel="noopener">
                     <img :src="attachmentUrl" :alt="message.content" class="message-attachment-preview" />
@@ -38,6 +41,8 @@ interface ChatMessage {
     modality?: string;
     blocked?: boolean;
     pending?: boolean;
+    interrupted_by?: string | null;
+    spoken_content?: string | null;
 }
 
 // Props du composant
@@ -64,6 +69,13 @@ const bubbleClass = computed(() => {
         default:
             return 'bubble-patient';
     }
+});
+
+// Réplique coupée : seule la partie prononcée (ce que l'étudiant a entendu)
+const displayedContent = computed(() => {
+    if (props.message.pending && !props.message.content) return 'Je vous écoute…';
+    if (props.message.interrupted_by && props.message.spoken_content) return props.message.spoken_content;
+    return props.message.content;
 });
 
 // Document affiché par l'examinateur (ECG, imagerie, biologie...)
@@ -164,6 +176,13 @@ const formattedTime = computed(() => {
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.03em;
+}
+
+.message-cut {
+    display: block;
+    margin-top: 0.25rem;
+    font-size: 0.75rem;
+    color: #b45309;
 }
 
 /* Transcription vocale en cours */

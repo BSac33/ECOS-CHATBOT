@@ -7,6 +7,7 @@ patient et l'arbitre sont simulés.
 import asyncio
 import json
 import threading
+import time
 
 import pytest
 from fastapi import FastAPI
@@ -434,3 +435,140 @@ def test_hands_free_stop(voice_app, world, session):
         events = read_until(ws, "listening")
     assert [k for k, _ in events] == ["listening"]
     assert session.exec(select(Message)).all() == []
+
+
+# ==================== Couper la parole au patient (faute en ECOS) ====================
+
+def patient_rows(session, world):
+    return session.exec(select(Message).where(Message.attempt_id == world["attempt"].id,
+                                              Message.role == ChatRole.patient)
+                        .order_by(Message.created_at)).all()
+
+
+def test_speaking_over_the_patient_is_recorded(voice_app, world, session, monkeypatch):
+    client, _ = voice_app(segments=[SEG_QUESTION, ["Pardon", "je", "reprends"]], tts_frame_delay=0.3)
+    captured = []
+
+    async def agent(**kwargs):
+        captured.append(kwargs)
+        for chunk in REPLY_CHUNKS:
+            yield ("delta", chunk)
+        yield ("done", PatientAgentResult(reply=REPLY))
+    monkeypatch.setattr(chat_routes, "stream_patient_agent", agent)
+
+    with client.websocket_connect(url(world)) as ws:
+        converse(ws)
+        say(ws)
+        read_until(ws, "audio")
+        ws.send_json({"type": "playback", "state": "started"})
+        say(ws)                                          # l'étudiant parle par-dessus
+        cut = read_until(ws, "interrupted")
+        read_until(ws, "transcript_final")
+        ws.send_json({"type": "playback", "state": "ended"})
+        read_until(ws, "done")
+
+    event = next(d for k, d in cut if k == "patient_interrupted")
+    assert event["reason"] == "voice"
+    first = patient_rows(session, world)[0]
+    assert first.content == REPLY                        # réplique complète conservée
+    assert first.interrupted_by == "voice"
+    assert first.spoken_content.endswith("…")            # seulement ce qui a été prononcé
+    heard = first.spoken_content.rstrip(" …").split()
+    assert 1 <= len(heard) < len(REPLY.split()) and REPLY.startswith(" ".join(heard))
+    assert event["message_id"] == str(first.id) and event["spoken_content"] == first.spoken_content
+
+    # Au tour suivant, le patient sait qu'on l'a coupé et ne « se souvient » que de ce qu'il a dit
+    second = captured[1]
+    assert second["history"][-1] == {"role": "patient", "content": first.spoken_content}
+    assert any("coupé la parole" in s for s in second["station_state"])
+
+
+def test_interrupt_button_is_recorded(voice_app, world, session):
+    client, _ = voice_app(tts_frame_delay=0.3)
+    with client.websocket_connect(url(world)) as ws:
+        ws.receive_json()
+        speak(ws)
+        read_until(ws, "audio")
+        ws.send_json({"type": "playback", "state": "started"})
+        ws.send_json({"type": "interrupt"})
+        events = read_until(ws, "interrupted")
+    assert next(d for k, d in events if k == "patient_interrupted")["reason"] == "button"
+    assert patient_rows(session, world)[0].interrupted_by == "button"
+
+    # Exposé au navigateur (rechargement) et au debrief
+    import evaluation_routes
+    listed = chat_routes.get_messages(world["attempt"].id, session=session, user=world["user"])
+    patient = next(m for m in listed if m["role"] == "patient")
+    assert patient["interrupted_by"] == "button" and patient["spoken_content"].endswith("…")
+    debrief = evaluation_routes.get_transcript(world["attempt"].id, session=session, user=world["user"])
+    assert [(i["reason"], i["full_reply"]) for i in debrief["interruptions"]] == [("button", REPLY)]
+
+
+def test_push_to_talk_over_the_patient_is_recorded(voice_app, world, session):
+    client, _ = voice_app(tts_frame_delay=0.3)
+    with client.websocket_connect(url(world)) as ws:
+        ws.receive_json()
+        speak(ws)
+        read_until(ws, "audio")
+        ws.send_json({"type": "playback", "state": "started"})
+        ws.send_json({"type": "start"})                  # reprend le micro pendant que le patient parle
+        read_until(ws, "listening")
+    assert patient_rows(session, world)[0].interrupted_by == "push_to_talk"
+
+
+def test_cut_before_reply_is_saved_is_attached_afterwards(voice_app, world, session, monkeypatch):
+    client, _ = voice_app()
+
+    async def slow_end(**kwargs):
+        yield ("delta", "Ça a commen")
+        yield ("delta", "cé devant")
+        await asyncio.sleep(0.8)                         # le patient parle déjà, la fin arrive plus tard
+        yield ("delta", " la télé ?")
+        yield ("done", PatientAgentResult(reply=REPLY))
+    monkeypatch.setattr(chat_routes, "stream_patient_agent", slow_end)
+
+    with client.websocket_connect(url(world)) as ws:
+        ws.receive_json()
+        speak(ws)
+        read_until(ws, "audio")
+        ws.send_json({"type": "playback", "state": "started"})
+        ws.send_json({"type": "interrupt"})
+        events = read_until(ws, "patient_interrupted")   # rattachée une fois la réplique enregistrée
+    kinds = [k for k, _ in events]
+    assert kinds.index("interrupted") < kinds.index("done") < kinds.index("patient_interrupted")
+    row = patient_rows(session, world)[0]
+    assert row.content == REPLY and row.interrupted_by == "button"
+    assert row.spoken_content.startswith("Ça") and row.spoken_content.endswith("…")
+
+
+def test_overlap_on_the_last_word_is_not_counted(voice_app, world, session):
+    client, _ = voice_app()
+    with client.websocket_connect(url(world)) as ws:
+        ws.receive_json()
+        speak(ws)
+        read_until(ws, "audio_end")
+        ws.send_json({"type": "playback", "state": "started"})
+        time.sleep(0.7)                                  # 6 mots × 80 ms : toute la réplique est jouée
+        ws.send_json({"type": "interrupt"})
+        events = read_until(ws, "interrupted")
+    assert "patient_interrupted" not in [k for k, _ in events]
+    row = patient_rows(session, world)[0]
+    assert row.interrupted_by is None and row.spoken_content is None
+
+
+def test_false_start_is_not_an_interruption(voice_app, world, session, monkeypatch):
+    client, _ = voice_app(segments=[["Depuis", "quand"], ["avez-vous", "mal", "?"]])
+
+    async def slow_agent(**kwargs):
+        await asyncio.sleep(1.0)
+        yield ("delta", "Oui.")
+        yield ("done", PatientAgentResult(reply="Oui."))
+    monkeypatch.setattr(chat_routes, "stream_patient_agent", slow_agent)
+    with client.websocket_connect(url(world)) as ws:
+        converse(ws)
+        say(ws, speech_frames=4, silence_frames=10)
+        read_until(ws, "transcript_final")
+        say(ws, speech_frames=6)
+        read_until(ws, "transcript_final")
+        read_until(ws, "done")
+    assert [r.interrupted_by for r in patient_rows(session, world)] == [None]

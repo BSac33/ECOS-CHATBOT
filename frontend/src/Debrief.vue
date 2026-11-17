@@ -37,6 +37,31 @@
           <p>{{ evaluation.overall_feedback }}</p>
         </div>
 
+        <!-- Consultation orale : en ECOS, on ne coupe pas la parole au patient -->
+        <div v-if="oralConsultation" class="listening" :class="{ clean: interruptions.length === 0 }">
+          <h2>Écoute du patient</h2>
+          <p v-if="interruptions.length === 0">Vous n'avez jamais coupé la parole au patient.</p>
+          <template v-else>
+            <p>
+              Vous avez coupé la parole au patient
+              <strong>{{ interruptions.length }} fois</strong>.
+              En ECOS, laissez le patient finir ses phrases : couper la parole est une faute de communication,
+              et vous risquez de manquer une information.
+            </p>
+            <ul>
+              <li v-for="cut in interruptions" :key="cut.message_id">
+                <div class="heard">
+                  Le patient disait : « {{ cut.spoken_content.replace(/\s*…$/, '') }}… »
+                  <span class="reason">— coupé {{ reasonLabel(cut.reason) }}</span>
+                </div>
+                <div v-if="missedPart(cut)" class="missed">
+                  Vous n'avez pas entendu : « {{ missedPart(cut) }} »
+                </div>
+              </li>
+            </ul>
+          </template>
+        </div>
+
         <!-- Pour approfondir -->
         <div class="resources">
           <h2>Pour approfondir</h2>
@@ -106,11 +131,37 @@ interface CaseInfo {
   edn_codes?: string[];
 }
 
+// Réplique du patient coupée par l'étudiant (consultation orale)
+interface Interruption {
+  message_id: string;
+  reason: 'voice' | 'push_to_talk' | 'button' | string;
+  spoken_content: string;
+  full_reply: string;
+}
+
+const REASONS: Record<string, string> = {
+  voice: 'en parlant par-dessus',
+  push_to_talk: 'en reprenant le micro',
+  button: 'avec le bouton « Interrompre »',
+};
+
+function reasonLabel(reason: string): string {
+  return REASONS[reason] ?? '';
+}
+
+/** Partie de la réplique que le patient n'a pas pu prononcer. */
+function missedPart(cut: Interruption): string {
+  const heard = cut.spoken_content.replace(/\s*…$/, '').trim();
+  return cut.full_reply.startsWith(heard) ? cut.full_reply.slice(heard.length).trim() : '';
+}
+
 const route = useRoute();
 const attemptId = ref<string | null>(null);
 const isLoading = ref(true);
 const evaluation = ref<EvaluationData | null>(null);
 const caseInfo = ref<CaseInfo | null>(null);
+const oralConsultation = ref(false);
+const interruptions = ref<Interruption[]>([]);
 
 const scorePercentage = computed(() => {
   if (!evaluation.value) return 0;
@@ -159,6 +210,9 @@ onMounted(async () => {
     console.log(JSON.stringify(transcriptResponse, null, 2));
     
     const caseId = transcriptResponse.case_id;
+    oralConsultation.value = (transcriptResponse.transcript ?? [])
+      .some((m: { modality?: string }) => m.modality === 'voice');
+    interruptions.value = transcriptResponse.interruptions ?? [];
     
     // 3. Récupérer les infos du case
     const caseData = await apiService.getClinicalCase(caseId);
@@ -316,6 +370,45 @@ onMounted(async () => {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
   border-left: 4px solid #10b981;
   margin-bottom: 0;
+}
+
+.listening {
+  margin-top: 2rem;
+  padding: 1.5rem;
+  background: #fff7ed;
+  border-left: 4px solid #f59e0b;
+  border-radius: 12px;
+}
+
+.listening.clean {
+  background: #f0fdf4;
+  border-left-color: #22c55e;
+}
+
+.listening h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.25rem;
+  color: #1f2937;
+}
+
+.listening ul {
+  margin: 0.75rem 0 0;
+  padding-left: 1.25rem;
+}
+
+.listening li {
+  margin-bottom: 0.75rem;
+}
+
+.listening .reason {
+  color: #92400e;
+  font-size: 0.9rem;
+}
+
+.listening .missed {
+  margin-top: 0.25rem;
+  color: #6b7280;
+  font-style: italic;
 }
 
 .resources h2 {

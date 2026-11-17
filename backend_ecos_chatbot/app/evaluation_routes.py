@@ -28,6 +28,41 @@ from models import UserRole, User
 
 router = APIRouter()
 
+INTERRUPTION_LABEL = "coupé par l'étudiant"
+
+
+def build_evaluation_transcript(messages: list) -> tuple[str, int]:
+    """Transcript soumis à l'évaluateur, et nombre de fois où l'étudiant a coupé la
+    parole au patient. Une réplique coupée n'y figure que pour ce qui a été prononcé."""
+    parts = []
+    interruptions = 0
+    spoken_mode = any(getattr(m, "modality", "text") == "voice" for m in messages)
+    for msg in messages:
+        # Filtrer les commandes CLI (/end, /finalize, etc.)
+        if msg.content.startswith('/'):
+            continue
+        role = msg.role.value
+        if role == "student":
+            parts.append(f"ÉTUDIANT: {msg.content}")
+        elif role == "patient":
+            if msg.interrupted_by:
+                interruptions += 1
+                spoken = msg.spoken_content if msg.spoken_content is not None else msg.content
+                parts.append(f"PATIENT ({INTERRUPTION_LABEL}): {spoken}")
+            else:
+                parts.append(f"PATIENT: {msg.content}")
+        elif role == "examiner":
+            # Résultats d'examen clinique / documents montrés à l'étudiant
+            parts.append(f"EXAMINATEUR: {msg.content}")
+        # On ignore les messages system
+    transcript = "\n\n".join(parts)
+    if spoken_mode:
+        header = (f"[COMMUNICATION ORALE] L'étudiant a coupé la parole au patient {interruptions} fois"
+                  if interruptions else
+                  "[COMMUNICATION ORALE] L'étudiant n'a jamais coupé la parole au patient")
+        transcript = f"{header}\n\n{transcript}"
+    return transcript, interruptions
+
 
 @router.post("/attempts/{attempt_id}/evaluate", response_model=EvaluationOut)
 def evaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_session)], user: Annotated[User, Depends(check_authorization(UserRole.student))]):
@@ -106,24 +141,8 @@ def evaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_s
             "Aucun message dans cette tentative. Impossible d'évaluer."
         )
     
-    # Construire le transcript (en filtrant les commandes)
-    transcript_parts = []
-    
-    for msg in messages:
-        # Filtrer les commandes CLI (/end, /finalize, etc.)
-        if msg.content.startswith('/'):
-            continue
-            
-        if msg.role.value == "student":
-            transcript_parts.append(f"ÉTUDIANT: {msg.content}")
-        elif msg.role.value == "patient":
-            transcript_parts.append(f"PATIENT: {msg.content}")
-        elif msg.role.value == "examiner":
-            # Résultats d'examen clinique / documents montrés à l'étudiant
-            transcript_parts.append(f"EXAMINATEUR: {msg.content}")
-        # On ignore les messages system
-    
-    transcript = "\n\n".join(transcript_parts)
+    # Construire le transcript (commandes filtrées, coupures de parole signalées)
+    transcript, _ = build_evaluation_transcript(messages)
     
     # Préparer le contexte du cas
     case_context = f"""
@@ -216,18 +235,31 @@ def get_transcript(attempt_id: UUID, session: Session = Depends(get_session), us
     messages = session.exec(messages_stmt).all()
     
     transcript = []
+    interruptions = []
     for msg in messages:
         if msg.role.value != "system":
             transcript.append({
                 "id": msg.id,
                 "role": msg.role.value,
                 "content": msg.content,
+                "modality": msg.modality,
+                "interrupted_by": msg.interrupted_by,
+                "spoken_content": msg.spoken_content,
                 "timestamp": msg.created_at.isoformat() if msg.created_at else None
             })
+            if msg.interrupted_by:
+                interruptions.append({
+                    "message_id": str(msg.id),
+                    "reason": msg.interrupted_by,
+                    "spoken_content": msg.spoken_content,
+                    "full_reply": msg.content,
+                })
     
     return {
         "attempt_id": attempt_id,
         "case_id": attempt.case_id,
         "is_completed": attempt.is_completed,
-        "transcript": transcript
+        "transcript": transcript,
+        # En ECOS, on ne coupe pas la parole au patient
+        "interruptions": interruptions,
     }

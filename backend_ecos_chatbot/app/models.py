@@ -42,6 +42,8 @@ class ChatOut(BaseModel):
     # patient_reply contient alors le message de l'examinateur (hors personnage)
     blocked: bool = False
     examiner_notes: List[ExaminerNoteOut] = []
+    # Identifiant du message patient enregistré (mode vocal : marquage d'une coupure)
+    patient_message_id: Optional[str] = None
 
 class AttachmentUploadOut(BaseModel):
     id: str  # UUID sérialisé
@@ -375,6 +377,11 @@ class Message(SQLModel, table=True):
     is_active: bool = Field(default=True)
     # "text" (saisi au clavier) ou "voice" (dit à l'oral / prononcé par la synthèse vocale)
     modality: str = Field(default="text")
+    # Réplique du patient coupée par l'étudiant (faute de communication en ECOS) :
+    # "voice" (parle par-dessus), "push_to_talk" (reprend le micro), "button" (coupe la voix)
+    interrupted_by: Optional[str] = None
+    # Ce que le patient a réellement prononcé avant d'être coupé (content = réplique complète)
+    spoken_content: Optional[str] = None
     
     
 class ModerationEvent(SQLModel, table=True):

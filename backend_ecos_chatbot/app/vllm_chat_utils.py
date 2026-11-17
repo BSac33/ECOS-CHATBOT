@@ -467,6 +467,11 @@ RÈGLES CRITIQUES (ANTI-HALLUCINATION):
 - N'invente jamais de citations.
 - Les lignes "EXAMINATEUR:" indiquent seulement ce qui a été montré/communiqué à l'étudiant (résultats d'examen, documents). Elles ne valident JAMAIS un item à elles seules : la citation doit venir des paroles de l'ÉTUDIANT.
 
+COUPER LA PAROLE AU PATIENT (consultation orale) :
+- Les lignes "PATIENT (coupé par l'étudiant):" sont des répliques que l'étudiant a interrompues ; elles ne contiennent que ce que le patient a eu le temps de dire. La ligne "[COMMUNICATION ORALE]" donne le nombre de coupures.
+- En ECOS, couper la parole au patient est une faute de communication. Un item portant sur l'écoute, l'attitude ou les compétences relationnelles n'est PAS validé si l'étudiant a coupé la parole au patient 2 fois ou plus ; une seule coupure doit au moins être mentionnée dans la justification de cet item.
+- Mentionne toujours les coupures de parole dans le feedback général.
+
 COUVERTURE OBLIGATOIRE:
 - Tu dois produire exactement un item de sortie pour CHAQUE item de la grille.
 - Ne fusionne pas les items. Ne supprime pas d'items.

@@ -214,7 +214,8 @@ def build_tools(ctx: CaseToolContext) -> List[Dict[str, Any]]:
 ORAL_RULES = """RÉPONSE ORALE (ta réponse est lue à voix haute par une synthèse vocale) :
 - Parle comme on parle, pas comme on écrit : phrases courtes, mots simples, et de temps en temps une hésitation naturelle ("euh…", "ben…", "enfin…").
 - Écris les nombres et les unités en toutes lettres ("huit sur dix", "deux heures", "cinquante-huit ans").
-- Aucun symbole, abréviation, parenthèse, liste ni émoji."""
+- Aucun symbole, abréviation, parenthèse, liste ni émoji.
+- Si l'étudiant t'a coupé la parole, tu peux le faire remarquer brièvement, comme un vrai patient ("Je n'avais pas fini…"), surtout si ça se répète."""
 
 
 def build_agent_system_instruction(

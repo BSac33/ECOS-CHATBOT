@@ -140,6 +140,8 @@ def get_messages(attempt_id: UUID, session: Session = Depends(get_session), user
             "attachment_id": str(m.attachment_id) if m.attachment_id else None,
             "attachment_mime_type": mime_types.get(m.attachment_id),
             "modality": m.modality,
+            "interrupted_by": m.interrupted_by,
+            "spoken_content": m.spoken_content,
             "created_at": m.created_at.isoformat() if m.created_at else "",
         }
         for m in msgs
@@ -238,12 +240,23 @@ def _blocked_notice(verdict: Verdict) -> str:
 
 
 def _station_state(rows: list[Message]) -> list[str]:
-    """Résumé de ce que l'examinateur a déjà communiqué (sans les résultats)."""
+    """Résumé de ce que l'examinateur a déjà communiqué (sans les résultats), et
+    coupures de parole subies par le patient (pour qu'il puisse réagir)."""
     state = []
     for r in rows:
         if r.role == ChatRole.examiner:
             state.append(r.content.split(" : ", 1)[0])
+    patient_rows = [r for r in rows if r.role == ChatRole.patient]
+    cuts = sum(1 for r in patient_rows if r.interrupted_by)
+    if patient_rows and patient_rows[-1].interrupted_by:
+        times = "" if cuts == 1 else f" ({cuts} fois depuis le début de la consultation)"
+        state.append(f"L'étudiant t'a coupé la parole pendant ta dernière réponse, tu n'avais pas fini{times}")
     return state
+
+
+def _spoken(message: Message) -> str:
+    """Ce que l'interlocuteur a réellement entendu (réplique coupée : partie prononcée)."""
+    return message.spoken_content if message.spoken_content is not None else message.content
 
 
 @contextmanager
@@ -322,7 +335,7 @@ def _prepare_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: Use
     stmt = select(Message).where(Message.attempt_id == attempt_id).order_by(Message.created_at)
     history_rows = session.exec(stmt).all()
     history = [
-        {"role": r.role.value, "content": r.content}
+        {"role": r.role.value, "content": _spoken(r)}
         for r in history_rows
         if r.role in (ChatRole.student, ChatRole.patient)
     ]
@@ -427,8 +440,9 @@ def _persist_exchange(session: Session, turn: _Turn, result: PatientAgentResult,
     student_msg = Message(attempt_id=turn.attempt_id, role=ChatRole.student, content=turn.message,
                           modality=turn.modality, created_at=ts())
     session.add(student_msg)
-    session.add(Message(attempt_id=turn.attempt_id, role=ChatRole.patient, content=result.reply,
-                        modality=turn.modality, created_at=ts()))
+    patient_msg = Message(attempt_id=turn.attempt_id, role=ChatRole.patient, content=result.reply,
+                          modality=turn.modality, created_at=ts())
+    session.add(patient_msg)
 
     examiner_notes: list[ExaminerNoteOut] = []
     for event in result.events:
@@ -480,6 +494,7 @@ def _persist_exchange(session: Session, turn: _Turn, result: PatientAgentResult,
         patient_reply=result.reply,
         attachments=[d.attachment_id for d in result.documents] or None,
         examiner_notes=examiner_notes,
+        patient_message_id=str(patient_msg.id),
     )
 
 

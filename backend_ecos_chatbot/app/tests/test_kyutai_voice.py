@@ -131,6 +131,9 @@ async def test_tts_word_by_word(kyutai):
 
     assert len(frames) == 5 and all(len(f) == 1920 for f in frames)
     assert tts.samples_received == 5 * 1920
+    # Horodatage de chaque mot dans le flux audio (pour savoir ce qui a été entendu)
+    assert [t[0] for t in tts.word_timings] == ["La", "douleur", "est", "à", "8 sur 10."]
+    assert [round(t[1], 2) for t in tts.word_timings] == [0.0, 0.08, 0.16, 0.24, 0.32]
     assert kyutai.tts_texts == ["La", "douleur", "est", "à", "8 sur 10."]
     assert kyutai.tts_eos == 1
     request = kyutai.tts_requests[0]

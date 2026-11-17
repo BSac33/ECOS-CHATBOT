@@ -239,6 +239,7 @@ RÈGLES D'ÉVALUATION:
 - Si un élément attendu n'apparaît pas dans le transcript, le point n'est PAS attribué. Si l'information est présente dans le transcript patient ou médecin, attribue le point.
 - Le feedback général doit être constructif et pédagogique
 - N'invente pas d'informations qui ne sont pas dans le transcript
+- Les lignes "PATIENT (coupé par l'étudiant):" sont des répliques que l'étudiant a interrompues (ligne "[COMMUNICATION ORALE]" : nombre de coupures). En ECOS, couper la parole au patient est une faute de communication : un item d'écoute ou de compétences relationnelles n'est PAS validé à partir de 2 coupures, et toute coupure est mentionnée dans le feedback général
 
 IMPORTANT - Évaluation réaliste et clinique:
 - Ne pénalise PAS l'absence d'annonce de la structure de l'interrogatoire (ex: "je vais d'abord vous poser des questions sur...") - cela n'est PAS demandé en pratique clinique réelle

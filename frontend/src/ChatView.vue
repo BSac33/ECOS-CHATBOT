@@ -117,6 +117,11 @@ interface ChatMessage {
     blocked?: boolean;
     // Transcription vocale en cours
     pending?: boolean;
+    // Identifiant en base (les messages ajoutés en direct ont un id temporaire)
+    server_id?: string | null;
+    // Réplique du patient coupée par l'étudiant
+    interrupted_by?: string | null;
+    spoken_content?: string | null;
 }
 
 /**
@@ -139,6 +144,7 @@ interface ChatResponse {
     attachments?: string[];
     blocked?: boolean;
     examiner_notes?: ExaminerNote[];
+    patient_message_id?: string | null;
 }
 
 /**
@@ -307,7 +313,9 @@ function startTurn(studentMessageId: string, modality: 'text' | 'voice'): Turn {
                 add({ id: crypto.randomUUID(), role: 'system', content: final.patient_reply, created_at: new Date().toISOString() });
             } else {
                 // Texte de référence tel qu'enregistré
-                ensurePatientBubble().content = final.patient_reply;
+                const bubble = ensurePatientBubble();
+                bubble.content = final.patient_reply;
+                bubble.server_id = final.patient_message_id ?? null;
             }
             scrollToBottom();
         },
@@ -581,6 +589,15 @@ function handleVoiceEvent(event: VoiceEvent) {
         case 'audio_end':
             awaitingVoice.value = false;
             break;
+        case 'patient_interrupted': {
+            // Coupure de parole enregistrée (comptée dans la correction)
+            const cut = messages.value.find(m => (m.server_id ?? m.id) === event.message_id);
+            if (cut) {
+                cut.interrupted_by = event.reason as string;
+                cut.spoken_content = event.spoken_content as string;
+            }
+            break;
+        }
         case 'voice_unavailable':
             awaitingVoice.value = false;
             consultationNotice.value = event.message as string;

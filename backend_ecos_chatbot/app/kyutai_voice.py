@@ -407,6 +407,8 @@ class TTSSession:
         self.url = url or tts_url(self.voice)
         self.connect_timeout = connect_timeout
         self.samples_received = 0
+        # Horodatage de chaque mot dans le flux audio : (texte, début_s, fin_s), dans l'ordre
+        self.word_timings: List[tuple] = []
         self._ws: Optional[ClientConnection] = None
         self._ended = False
 
@@ -444,6 +446,11 @@ class TTSSession:
                     pcm = message.get("pcm") or []
                     self.samples_received += len(pcm)
                     yield pcm
+                elif kind == "Text":
+                    text = str(message.get("text", ""))
+                    if text:  # le serveur envoie aussi un message vide au début
+                        self.word_timings.append(
+                            (text, float(message.get("start_s", 0.0)), float(message.get("stop_s", 0.0))))
                 elif kind == "Error":
                     raise VoiceServiceError(f"TTS : {message.get('message', 'erreur')}")
         except ConnectionClosed:

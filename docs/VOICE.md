@@ -59,6 +59,39 @@ micro ouvert ──► STT en continu (une connexion pour toute la consultation)
 | L'étudiant reprend avant que le patient ait parlé (faux départ) | La réponse en préparation est annulée (rien n'était enregistré) et la phrase continue : une seule question complète est enregistrée (`turn_cancelled`) |
 | Le micro entend la voix du patient (pas de casque) | **Filtre d'écho** : pendant la voix du patient et 1,5 s après, les mots reconnus qui figurent dans sa réplique sont ignorés |
 
+## Couper la parole au patient : comptabilisé
+
+En ECOS, **on ne coupe pas la parole au patient**. Chaque coupure est enregistrée et compte
+dans la correction.
+
+| Ce qui compte | Ce qui ne compte pas |
+|---|---|
+| Parler par-dessus le patient (mains libres) : `voice` | Un chevauchement sur son **dernier mot** (il avait fini) |
+| Reprendre le micro pendant qu'il parle (appuyer pour parler) : `push_to_talk` | Un **faux départ** (le patient n'avait pas encore parlé) |
+| Cliquer « Interrompre le patient » : `button` | |
+
+**Ce qui a réellement été dit.** La synthèse Kyutai horodate chaque mot (messages `Text`
+avec `start_s`). Au moment de la coupure, le serveur connaît la durée de voix jouée par le
+navigateur (signal `playback started`, à défaut l'envoi de la première trame), donc les mots
+prononcés. Sur le message du patient :
+- `content` garde la réplique complète générée ;
+- `spoken_content` contient ce qui a été prononcé (« Oui, dans le bras gauche et … ») ;
+- `interrupted_by` donne la façon dont il a été coupé.
+
+**Conséquences :**
+- **Correction** : la réplique apparaît comme `PATIENT (coupé par l'étudiant): …` avec la
+  seule partie prononcée, et l'en-tête `[COMMUNICATION ORALE]` donne le nombre de coupures.
+  Consigne de l'évaluateur : un item d'écoute ou de compétences relationnelles n'est pas
+  validé à partir de **2 coupures** (seuil réglable dans le prompt de `vllm_chat_utils.py`),
+  et toute coupure est mentionnée dans le retour.
+- **Debrief** : section « Écoute du patient » avec le nombre de coupures et, pour chacune,
+  ce que le patient disait et **ce que l'étudiant n'a pas entendu** (souvent une information
+  clinique : un item de la grille).
+- **Réalisme** : le patient ne « se souvient » que de ce qu'il a dit, et sait qu'on l'a
+  coupé ; il peut le faire remarquer (« Je n'avais pas fini… »), surtout si ça se répète.
+- La coupure est signalée au navigateur (`patient_interrupted`) après le `done` de la
+  réplique, même si elle a eu lieu avant son enregistrement.
+
 Le serveur ne sait pas quand le navigateur a fini de jouer l'audio reçu (la synthèse va plus
 vite que le temps réel) : le navigateur le lui signale (`playback started/ended`).
 
@@ -119,6 +152,7 @@ suivant attend que le précédent soit enregistré, pour que l'historique du pat
 | ← | binaire | voix du patient, PCM float32 little-endian, mono, 24 kHz |
 | ← | `audio_end` / `interrupted` | fin de la voix / voix coupée |
 | ← | `turn_cancelled` | faux départ : la phrase de l'étudiant continue |
+| ← | `patient_interrupted {message_id, reason, spoken_content}` | coupure de parole enregistrée (comptée dans la correction) |
 | ← | `conversation_stopped` | micro fermé |
 | ← | `voice_unavailable {message}` | synthèse indisponible : la réplique reste écrite |
 
@@ -185,8 +219,6 @@ silence, tentative expirée, authentification et contrôle d'origine.
 
 ## Suite prévue
 
-- **Ce qui a vraiment été dit** : en cas de coupure, n'enregistrer que la partie
-  prononcée (les messages `Text` de la synthèse donnent l'horodatage de chaque mot).
 - Voix de l'examinateur pour les résultats d'examen.
 - Long silence de l'étudiant : le patient pourrait relancer (« Docteur… ? »), comme Unmute
   le fait après 7 s.

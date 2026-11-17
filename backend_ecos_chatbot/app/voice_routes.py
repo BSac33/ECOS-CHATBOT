@@ -33,6 +33,8 @@ Serveur -> navigateur
   {"type": "interrupted"}                         voix du patient coupée
   {"type": "turn_cancelled"}                      faux départ : l'étudiant a repris avant
                                                   que le patient parle, la phrase continue
+  {"type": "patient_interrupted", "message_id", "reason", "spoken_content"}
+                                                  coupure de parole enregistrée (faute en ECOS)
   {"type": "voice_unavailable", "message": ...}   synthèse indisponible : la réplique reste écrite
   {"type": "error", "status": ..., "message": ...}
 """
@@ -56,10 +58,10 @@ import chat_routes
 from auth import get_current_user
 from arbiter import normalize
 from kyutai_voice import (
-    STTSession, STTStream, TTSSession, VoiceServiceError, WordChunker,
-    default_voice, pcm_from_bytes, pcm_to_bytes,
+    SAMPLE_RATE, STTSession, STTStream, TTSSession, VoiceServiceError, WordChunker,
+    default_voice, pcm_from_bytes, pcm_to_bytes, prepare_text_for_tts,
 )
-from models import Attempts, ChatIn, ClinicalCase, User
+from models import Attempts, ChatIn, ClinicalCase, Message, User
 
 logger = logging.getLogger(__name__)
 
@@ -73,6 +75,16 @@ PAUSE_WARMUP_STEPS = 12        # premières prédictions instables, ignorées
 ENDPOINT_FALLBACK_STEPS = 25   # 2 s sans nouveau mot : fin de phrase forcée
 BARGE_IN_MIN_WORDS = 2         # mots (hors écho) nécessaires pour couper la parole au patient
 ECHO_TAIL_SEC = 1.5            # le micro peut encore entendre la fin de la voix (délai STT ~0,5 s)
+
+
+# Marge de démarrage de la lecture côté navigateur (voir services/voice.ts)
+PLAYBACK_START_MARGIN_SEC = 0.05
+
+
+def _reply_words(text: str) -> list:
+    """Mots d'une réplique, découpés comme pour la synthèse vocale."""
+    chunker = WordChunker()
+    return [w for w in chunker.feed(text) + chunker.flush() if prepare_text_for_tts(w)]
 
 
 def _echo_key(word: str) -> str:
@@ -133,6 +145,7 @@ class VoiceConversation:
         self.barge_candidates: list = []
         # Voix du patient côté navigateur (rapportée par le client) et filtre d'écho
         self.playing = False
+        self.playback_started_at: Optional[float] = None
         self.echo_until = 0.0
         self.reply_text = ""
         self.echo_vocab: set = set()
@@ -176,7 +189,7 @@ class VoiceConversation:
                 elif kind == "stop":
                     await self.stop_listening()
                 elif kind == "interrupt":
-                    await self.interrupt()
+                    await self.interrupt("button")
                 elif kind == "conversation_start":
                     await self.start_conversation()
                 elif kind == "conversation_stop":
@@ -190,7 +203,7 @@ class VoiceConversation:
 
     async def start_listening(self) -> None:
         # L'étudiant reprend la parole : la voix du patient est coupée
-        await self.interrupt()
+        await self.interrupt("push_to_talk")
         if self.stt is not None:
             await self.stt.cancel()
 
@@ -226,14 +239,59 @@ class VoiceConversation:
         if task is self.turn_task and self.state == "responding":
             self.state = "waiting"
 
-    async def interrupt(self) -> None:
+    async def interrupt(self, reason: str) -> None:
         """Coupe la VOIX du patient. Le texte de la réplique continue d'arriver et est
-        enregistré : couper la parole ne fait jamais perdre un échange."""
-        stopped = await self.speaker.stop() if self.speaker is not None else False
+        enregistré : couper la parole ne fait jamais perdre un échange.
+
+        En ECOS, on ne coupe pas la parole au patient : si des mots de sa réplique
+        n'ont pas été prononcés, la coupure est enregistrée (raison, partie entendue).
+        """
+        speaker = self.speaker
+        played = self._played_seconds(speaker)
+        stopped = await speaker.stop() if speaker is not None else False
         if stopped or self.playing:  # le navigateur peut encore jouer de l'audio reçu
+            if speaker is not None and played > 0:
+                speaker.interruption = {"reason": reason, "heard": speaker.heard_count(played)}
+                await self._save_interruption(speaker)
             self.playing = False
+            self.playback_started_at = None
             self.echo_until = time.monotonic() + ECHO_TAIL_SEC
             await self.send_json({"type": "interrupted"})
+
+    def _played_seconds(self, speaker: Optional["_Speaker"]) -> float:
+        """Durée de voix réellement jouée par le navigateur au moment de la coupure."""
+        now = time.monotonic()
+        if self.playback_started_at is not None:
+            played = now - self.playback_started_at
+        elif speaker is not None and speaker.first_audio_at is not None:
+            played = now - speaker.first_audio_at - PLAYBACK_START_MARGIN_SEC
+        else:
+            return 0.0
+        if speaker is not None:
+            played = min(played, speaker.audio_seconds)
+        return max(0.0, played)
+
+    async def _save_interruption(self, speaker: "_Speaker") -> None:
+        """Enregistre la coupure sur le message du patient (dès qu'il est enregistré)."""
+        info = speaker.interruption
+        if not info or speaker.interruption_saved or speaker.message_id is None or speaker.final_words is None:
+            return
+        speaker.interruption_saved = True
+        heard = speaker.final_words[: info["heard"]]
+        if len(heard) >= len(speaker.final_words):
+            return  # chevauchement sur le dernier mot : le patient avait fini
+        spoken = (" ".join(heard) + " …").strip()
+        with chat_routes._write_session() as session:
+            message = session.get(Message, UUID(speaker.message_id))
+            if message is None:
+                return
+            message.interrupted_by = info["reason"]
+            message.spoken_content = spoken
+            session.add(message)
+            session.commit()
+        logger.info("✂️ Patient coupé (%s) après %d/%d mots", info["reason"], len(heard), len(speaker.final_words))
+        await self.send_json({"type": "patient_interrupted", "message_id": speaker.message_id,
+                              "reason": info["reason"], "spoken_content": spoken})
 
     async def close(self) -> None:
         if self.stream is not None:
@@ -275,8 +333,10 @@ class VoiceConversation:
     def on_playback(self, state: Optional[str]) -> None:
         if state == "started":
             self.playing = True
+            self.playback_started_at = time.monotonic()
         elif state == "ended":
             self.playing = False
+            self.playback_started_at = None
             self.echo_until = time.monotonic() + ECHO_TAIL_SEC
             self.barge_candidates = []
 
@@ -306,7 +366,7 @@ class VoiceConversation:
                 return
             words, self.barge_candidates = self.barge_candidates, []
             logger.info("🗣️ L'étudiant coupe la parole au patient")
-            await self.interrupt()
+            await self.interrupt("voice")
             await self._begin_utterance(words)
             return
         if self.state == "responding":
@@ -319,7 +379,7 @@ class VoiceConversation:
                 await self.send_json({"type": "turn_cancelled"})
                 await self._begin_utterance(self.last_utterance + [word])
                 return
-            await self.interrupt()
+            await self.interrupt("voice")
             await self._begin_utterance([word])
             return
         if self.state == "waiting":
@@ -389,6 +449,8 @@ class VoiceConversation:
                         return
                     elif kind == "done":
                         self._saved_turns.add(asyncio.current_task())
+                        speaker.message_id = value.patient_message_id
+                        speaker.final_words = _reply_words(value.patient_reply)
                         if value.blocked:
                             # Message refusé : avertissement écrit, pas de voix
                             speaker.mark_done()
@@ -396,13 +458,16 @@ class VoiceConversation:
                             return
                         await speaker.finish()
                         await self.send_json({"type": "done", **value.model_dump()})
+                        # Coupure survenue avant l'enregistrement de la réplique : rattachée
+                        # maintenant (après "done", pour que le navigateur connaisse le message)
+                        await self._save_interruption(speaker)
                         await speaker.wait()  # la tâche vit jusqu'à la fin de la voix
                         return
         finally:
             speaker.mark_done()
             await speaker.close()
-            if self.speaker is speaker:
-                self.speaker = None
+            # self.speaker reste la dernière réplique : le navigateur peut encore la
+            # jouer, et une coupure doit pouvoir lui être rattachée
 
 
 class _Speaker:
@@ -418,6 +483,14 @@ class _Speaker:
         self._muted = False   # coupé par l'étudiant
         self._done = False    # plus aucune voix à venir pour cette réplique
         self._audio_started = False
+        # Suivi de ce qui est prononcé, pour mesurer une éventuelle coupure
+        self.words_sent: list = []           # mots envoyés à la synthèse, dans l'ordre
+        self.samples_forwarded = 0
+        self.first_audio_at: Optional[float] = None
+        self.message_id: Optional[str] = None
+        self.final_words: Optional[list] = None
+        self.interruption: Optional[dict] = None
+        self.interruption_saved = False
 
     async def _ready(self) -> bool:
         if self._muted:
@@ -436,25 +509,48 @@ class _Speaker:
     async def _forward_audio(self) -> None:
         try:
             async for pcm in self.tts.audio():
-                self._audio_started = True
+                if not self._audio_started:
+                    self._audio_started = True
+                    self.first_audio_at = time.monotonic()
+                self.samples_forwarded += len(pcm)
                 await self.conversation.send_audio(pcm)
         except VoiceServiceError as e:
             logger.warning("⚠️ Synthèse vocale interrompue : %s", e)
         self._done = True
         await self.conversation.send_json({"type": "audio_end"})
 
+    async def _say(self, word: str) -> None:
+        if prepare_text_for_tts(word):
+            self.words_sent.append(word)
+            await self.tts.send_word(word)
+
     async def feed(self, text: str) -> None:
         words = self.chunker.feed(text)
         if words and await self._ready():
             for word in words:
-                await self.tts.send_word(word)
+                await self._say(word)
 
     async def finish(self) -> None:
         words = self.chunker.flush()
         if await self._ready():
             for word in words:
-                await self.tts.send_word(word)
+                await self._say(word)
             await self.tts.end()
+
+    @property
+    def audio_seconds(self) -> float:
+        return self.samples_forwarded / SAMPLE_RATE
+
+    def heard_count(self, played: float) -> int:
+        """Nombre de mots (au moins commencés) dans les `played` premières secondes de voix."""
+        timings = self.tts.word_timings
+        if timings:
+            count = sum(1 for _, start, _ in timings if start < played)
+        elif self.audio_seconds > 0:
+            count = int(len(self.words_sent) * min(1.0, played / self.audio_seconds))
+        else:
+            count = 0
+        return min(count, len(self.words_sent))
 
     async def wait(self) -> None:
         if self._pump is not None and not self._muted:
