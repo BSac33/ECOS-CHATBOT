@@ -8,7 +8,7 @@ import pytest_asyncio
 import kyutai_voice
 from fake_kyutai import FakeKyutai, speech_frame
 from kyutai_voice import (
-    STTSession, TTSSession, VoiceServiceError, WordChunker,
+    STTSession, STTStream, TTSSession, VoiceServiceError, WordChunker,
     pcm_from_bytes, pcm_to_bytes, prepare_text_for_tts,
 )
 
@@ -164,3 +164,55 @@ def test_urls(monkeypatch):
     monkeypatch.setenv("KYUTAI_TTS_URL", "ws://tts:8080")
     assert kyutai_voice.stt_url() == "wss://voix.exemple.fr/api/asr-streaming"
     assert kyutai_voice.tts_url("a/b c.wav") == "ws://tts:8080/api/tts_streaming?voice=a%2Fb+c.wav&format=PcmMessagePack"
+
+
+# ---------- Reconnaissance continue (consultation mains libres) ----------
+
+@pytest.mark.asyncio
+async def test_stt_stream_reports_words_pauses_and_markers(monkeypatch):
+    server = await FakeKyutai(segments=[["Bonjour", "monsieur"], ["Vous", "fumez", "?"]]).start()
+    monkeypatch.setenv("KYUTAI_STT_URL", server.url)
+    words, pauses, markers = [], [], []
+
+    async def on_word(w):
+        words.append(w)
+
+    async def on_step(p):
+        pauses.append(p)
+
+    async def on_marker(i):
+        markers.append(i)
+
+    stream = STTStream(on_word=on_word, on_step=on_step, on_marker=on_marker)
+    stream.open()
+    await stream.wait_ready()
+    try:
+        for _ in range(4):
+            stream.push_audio(speech_frame())
+        for _ in range(8):                       # silence : fin du premier segment
+            stream.push_audio([0.0] * 1920)
+        for _ in range(6):                       # deuxième segment
+            stream.push_audio(speech_frame())
+        stream.flush(42)                         # marqueur + silence
+        for _ in range(50):
+            await asyncio.sleep(0.02)
+            if markers:
+                break
+    finally:
+        await stream.close()
+        await server.stop()
+
+    assert words == ["Bonjour", "monsieur", "Vous", "fumez", "?"]
+    assert markers == [42]
+    assert max(pauses) > 0.6 and min(pauses) < 0.4   # pause détectée dans le silence
+    assert server.stt_frames_after_marker >= 6
+    assert stream.closed.is_set()
+
+
+@pytest.mark.asyncio
+async def test_stt_stream_unreachable(monkeypatch):
+    monkeypatch.setenv("KYUTAI_STT_URL", "ws://127.0.0.1:9")
+    stream = STTStream(connect_timeout=1.0)
+    stream.open()
+    with pytest.raises(VoiceServiceError):
+        await stream.wait_ready(timeout=3)

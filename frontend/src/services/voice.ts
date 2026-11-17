@@ -1,5 +1,10 @@
 /**
- * Client du mode vocal « appuyer pour parler » (WebSocket /chat/attempts/{id}/voice).
+ * Client du mode vocal (WebSocket /chat/attempts/{id}/voice).
+ *
+ * Deux façons de parler :
+ * - appuyer pour parler : startTalking() / stopTalking() ;
+ * - consultation mains libres : startConversation() ouvre le micro en continu, le
+ *   serveur détecte la fin des phrases et les interruptions.
  *
  * - Micro : AudioContext à 24 kHz (le navigateur rééchantillonne), un AudioWorklet
  *   découpe le signal en trames de 1920 échantillons (80 ms), envoyées en float32.
@@ -46,12 +51,16 @@ registerProcessor('mic-capture', MicCapture);
 export class VoiceClient {
   onEvent: (event: VoiceEvent) => void = () => {};
   onSpeakingChange: (speaking: boolean) => void = () => {};
+  /** Niveau du micro (0..1), pour l'animation */
+  onLevel: (level: number) => void = () => {};
 
   private ws: WebSocket | null = null;
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
   private capture: AudioWorkletNode | null = null;
   private recording = false;
+  private conversation = false;
+  private muted = false;
   private playHead = 0;
   private sources = new Set<AudioBufferSourceNode>();
   voice: string | null = null;
@@ -67,6 +76,10 @@ export class VoiceClient {
 
   get isSpeaking(): boolean {
     return this.sources.size > 0;
+  }
+
+  get isMuted(): boolean {
+    return this.muted;
   }
 
   /** Ouvre la connexion ; résolu au message "ready" du serveur. */
@@ -97,35 +110,69 @@ export class VoiceClient {
 
     ws.onclose = () => {
       this.recording = false;
+      this.conversation = false;
       this.onEvent({ type: 'closed' });
     };
+  }
+
+  /** Micro : AudioWorklet à 24 kHz, trames de 80 ms envoyées tant que l'on enregistre. */
+  private async ensureMic(): Promise<void> {
+    const ctx = this.ctx!;
+    await ctx.resume();
+    if (this.stream) return;
+    this.stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
+    });
+    const moduleUrl = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: 'application/javascript' }));
+    await ctx.audioWorklet.addModule(moduleUrl);
+    URL.revokeObjectURL(moduleUrl);
+    const source = ctx.createMediaStreamSource(this.stream);
+    this.capture = new AudioWorkletNode(ctx, 'mic-capture');
+    this.capture.port.onmessage = (e: MessageEvent<Float32Array<ArrayBuffer>>) => {
+      const frame = e.data;
+      let sum = 0;
+      for (let i = 0; i < frame.length; i++) sum += frame[i]! * frame[i]!;
+      this.onLevel(this.recording ? Math.min(1, Math.sqrt(sum / frame.length) * 6) : 0);
+      if (this.recording && this.isConnected) this.ws!.send(frame.buffer);
+    };
+    // Relié à la sortie via un gain nul : le graphe est bien traité, sans retour du micro
+    const mute = ctx.createGain();
+    mute.gain.value = 0;
+    source.connect(this.capture).connect(mute).connect(ctx.destination);
   }
 
   /** Début de prise de parole (coupe la voix du patient s'il parle). */
   async startTalking(): Promise<void> {
     await this.connect();
-    const ctx = this.ctx!;
-    await ctx.resume();
-    if (!this.stream) {
-      this.stream = await navigator.mediaDevices.getUserMedia({
-        audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 },
-      });
-      const moduleUrl = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: 'application/javascript' }));
-      await ctx.audioWorklet.addModule(moduleUrl);
-      URL.revokeObjectURL(moduleUrl);
-      const source = ctx.createMediaStreamSource(this.stream);
-      this.capture = new AudioWorkletNode(ctx, 'mic-capture');
-      this.capture.port.onmessage = (e: MessageEvent<Float32Array<ArrayBuffer>>) => {
-        if (this.recording && this.isConnected) this.ws!.send(e.data.buffer);
-      };
-      // Relié à la sortie via un gain nul : le graphe est bien traité, sans retour du micro
-      const mute = ctx.createGain();
-      mute.gain.value = 0;
-      source.connect(this.capture).connect(mute).connect(ctx.destination);
-    }
+    await this.ensureMic();
     this.stopPlayback();
     this.send({ type: 'start' });
     this.recording = true;
+  }
+
+  /** Consultation mains libres : micro ouvert en continu jusqu'à stopConversation(). */
+  async startConversation(): Promise<void> {
+    await this.connect();
+    await this.ensureMic();
+    this.send({ type: 'conversation_start' });
+    this.conversation = true;
+    this.muted = false;
+    this.recording = true;
+  }
+
+  stopConversation(): void {
+    if (!this.conversation) return;
+    this.conversation = false;
+    this.recording = false;
+    this.onLevel(0);
+    this.send({ type: 'conversation_stop' });
+  }
+
+  /** Couper / rétablir le micro pendant la consultation mains libres. */
+  setMuted(muted: boolean): void {
+    this.muted = muted;
+    if (this.conversation) this.recording = !muted;
+    if (muted) this.onLevel(0);
   }
 
   /** Fin de prise de parole : le serveur transcrit puis fait répondre le patient. */
@@ -143,6 +190,7 @@ export class VoiceClient {
 
   close(): void {
     this.recording = false;
+    this.conversation = false;
     this.stopPlayback();
     this.ws?.close();
     this.ws = null;
@@ -180,10 +228,10 @@ export class VoiceClient {
     this.playHead = startAt + buffer.duration;
     const wasSpeaking = this.isSpeaking;
     this.sources.add(source);
-    if (!wasSpeaking) this.onSpeakingChange(true);
+    if (!wasSpeaking) this.setSpeaking(true);
     source.onended = () => {
       this.sources.delete(source);
-      if (!this.isSpeaking) this.onSpeakingChange(false);
+      if (!this.isSpeaking) this.setSpeaking(false);
     };
   }
 
@@ -199,6 +247,13 @@ export class VoiceClient {
     }
     this.sources.clear();
     this.playHead = 0;
-    if (wasSpeaking) this.onSpeakingChange(false);
+    if (wasSpeaking) this.setSpeaking(false);
+  }
+
+  /** Le serveur ne sait pas quand le navigateur a fini de jouer ce qu'il a reçu :
+   * on le lui dit (filtre d'écho, interruption de la voix par la parole). */
+  private setSpeaking(speaking: boolean): void {
+    this.send({ type: 'playback', state: speaking ? 'started' : 'ended' });
+    this.onSpeakingChange(speaking);
   }
 }

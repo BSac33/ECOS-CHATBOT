@@ -361,6 +361,7 @@ def _patient_stream(turn: _Turn) -> AsyncIterator[StreamItem]:
             student_message=turn.message,
             ctx=turn.ctx,
             station_state=turn.station_state,
+            oral=turn.modality == "voice",
         )
     return _legacy_stream(turn)
 

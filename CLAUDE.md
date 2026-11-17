@@ -105,7 +105,7 @@ alembic downgrade -1
 - `vllm_chat_utils.py` - vLLM integration with structured output (Pydantic schemas)
 - `arbiter.py` - Fast student-message arbiter: lexical prefilter (instant block), LRU verdict cache, minimal LLM call (`{"category","tone"}` JSON, fixed system prompt for vLLM prefix caching, reused client, `ARBITER_TIMEOUT` then fail-open). Benchmark: `scripts/arbiter_bench.py`
 - `kyutai_voice.py` - Kyutai STT/TTS clients (moshi-server WebSocket + msgpack protocol, 24 kHz float32 PCM), `WordChunker` (LLM text deltas -> whole words for TTS)
-- `voice_routes.py` - Voice mode WebSocket `/chat/attempts/{id}/voice` (push-to-talk): STT -> shared `_run_turn` -> TTS word by word; barge-in cuts the voice only, the reply text is still persisted. See `docs/VOICE.md`
+- `voice_routes.py` - Voice mode WebSocket `/chat/attempts/{id}/voice`: push-to-talk (`start`/`stop`) or hands-free consultation (`conversation_start`: continuous STT, end of turn when pause probability > 0.6, barge-in by voice with echo filter, false-start merge). STT -> shared `_run_turn` -> TTS word by word; barge-in cuts the voice only, the reply text is still persisted. See `docs/VOICE.md`
 - `patient_agent.py` - Patient agent with tool calling (examiner tools: `afficher_document`, `resultat_examen_clinique`, `signaler_hors_cadre`). Tool execution is pure; the route applies events only after the arbiter allows the message. See `docs/PATIENT_AGENT.md`
 - Uses **structured output** with Pydantic models to enforce JSON schema compliance
 
@@ -118,7 +118,8 @@ alembic downgrade -1
 **Main Views:**
 - `App.vue` - Root component with router-view
 - `Dashboard.vue` - Case selection dashboard for students
-- `ChatView.vue` - Interactive patient interview interface
+- `ChatView.vue` - Interactive patient interview interface (text via SSE, push-to-talk, hands-free oral consultation)
+- `components/VoiceConsultation.vue` - Oral consultation screen: no text by default (transcript still persisted), patient status, mic level, examiner notes
 - `Debrief.vue` - Post-evaluation results display
 
 **Components:**

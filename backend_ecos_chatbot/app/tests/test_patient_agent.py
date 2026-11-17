@@ -92,6 +92,12 @@ def test_system_instruction_mentions_only_available_tools_and_state():
     assert "Document affiché – ECG" in prompt
 
 
+def test_oral_rules_only_in_voice_mode(ctx):
+    assert "RÉPONSE ORALE" not in build_agent_system_instruction("P", ctx)
+    oral = build_agent_system_instruction("P", ctx, oral=True)
+    assert "RÉPONSE ORALE" in oral and "toutes lettres" in oral
+
+
 # ---------- Exécution pure des outils ----------
 
 def test_exam_findings_are_not_sent_back_to_the_patient_model(ctx):

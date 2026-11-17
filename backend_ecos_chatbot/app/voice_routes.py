@@ -6,7 +6,15 @@ Un tour vocal suit exactement le même chemin qu'un tour écrit (_run_turn :
 arbitre en parallèle, agent patient avec outils, persistance), avec la
 reconnaissance vocale en entrée et la synthèse vocale en sortie.
 
+Deux façons de parler :
+- appuyer pour parler : "start" / "stop" délimitent chaque prise de parole ;
+- consultation mains libres : "conversation_start" ouvre le micro en continu ; la fin
+  de chaque phrase est détectée par le modèle (probabilité de pause), l'étudiant peut
+  couper la parole au patient en parlant, et un faux départ est rattrapé.
+
 Navigateur -> serveur
+  {"type": "conversation_start"} / {"type": "conversation_stop"}   mains libres
+  {"type": "playback", "state": "started"|"ended"}   la voix du patient joue / s'est tue
   {"type": "start"}          début de prise de parole (coupe le patient s'il parle)
   binaire                    audio du micro : PCM float32 little-endian, mono, 24 kHz
   {"type": "stop"}           fin de prise de parole -> transcription -> réplique du patient
@@ -23,6 +31,8 @@ Serveur -> navigateur
   binaire                                         voix du patient : PCM float32 LE, mono, 24 kHz
   {"type": "audio_end"}                           fin de la voix de la réplique
   {"type": "interrupted"}                         voix du patient coupée
+  {"type": "turn_cancelled"}                      faux départ : l'étudiant a repris avant
+                                                  que le patient parle, la phrase continue
   {"type": "voice_unavailable", "message": ...}   synthèse indisponible : la réplique reste écrite
   {"type": "error", "status": ..., "message": ...}
 """
@@ -32,6 +42,8 @@ import asyncio
 import json
 import logging
 import os
+import re
+import time
 from contextlib import aclosing, suppress
 from typing import Optional
 from urllib.parse import urlparse
@@ -42,8 +54,9 @@ from starlette.websockets import WebSocketState
 
 import chat_routes
 from auth import get_current_user
+from arbiter import normalize
 from kyutai_voice import (
-    STTSession, TTSSession, VoiceServiceError, WordChunker,
+    STTSession, STTStream, TTSSession, VoiceServiceError, WordChunker,
     default_voice, pcm_from_bytes, pcm_to_bytes,
 )
 from models import Attempts, ChatIn, ClinicalCase, User
@@ -53,6 +66,17 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 STT_UNAVAILABLE = "La reconnaissance vocale est indisponible. Réessayez ou passez à l'écrit."
+
+# Consultation mains libres (seuils de détection repris d'Unmute)
+PAUSE_THRESHOLD = 0.6          # probabilité de pause au-delà de laquelle la phrase est finie
+PAUSE_WARMUP_STEPS = 12        # premières prédictions instables, ignorées
+ENDPOINT_FALLBACK_STEPS = 25   # 2 s sans nouveau mot : fin de phrase forcée
+BARGE_IN_MIN_WORDS = 2         # mots (hors écho) nécessaires pour couper la parole au patient
+ECHO_TAIL_SEC = 1.5            # le micro peut encore entendre la fin de la voix (délai STT ~0,5 s)
+
+
+def _echo_key(word: str) -> str:
+    return re.sub(r"[^\w]", "", normalize(word))
 TTS_UNAVAILABLE = "La voix du patient est indisponible : sa réponse s'affiche par écrit."
 
 
@@ -97,6 +121,21 @@ class VoiceConversation:
         self.turn_task: Optional[asyncio.Task] = None
         self.speaker: Optional["_Speaker"] = None
         self._send_lock = asyncio.Lock()
+        self._saved_turns: set = set()       # tours dont la réplique est enregistrée
+        # Consultation mains libres
+        self.stream: Optional[STTStream] = None
+        self.state = "idle"                  # idle | waiting | user_speaking | flushing | responding
+        self.utterance: list = []
+        self.last_utterance: list = []
+        self.steps_seen = 0
+        self.steps_since_word = 0
+        self.marker_id = 0
+        self.barge_candidates: list = []
+        # Voix du patient côté navigateur (rapportée par le client) et filtre d'écho
+        self.playing = False
+        self.echo_until = 0.0
+        self.reply_text = ""
+        self.echo_vocab: set = set()
 
     # ---------- envoi (plusieurs tâches écrivent sur la même connexion) ----------
 
@@ -122,7 +161,9 @@ class VoiceConversation:
                 if message["type"] == "websocket.disconnect":
                     break
                 if message.get("bytes") is not None:
-                    if self.stt is not None:
+                    if self.stream is not None:
+                        self.stream.push_audio(pcm_from_bytes(message["bytes"]))
+                    elif self.stt is not None:
                         self.stt.push_audio(pcm_from_bytes(message["bytes"]))
                     continue
                 try:
@@ -136,6 +177,12 @@ class VoiceConversation:
                     await self.stop_listening()
                 elif kind == "interrupt":
                     await self.interrupt()
+                elif kind == "conversation_start":
+                    await self.start_conversation()
+                elif kind == "conversation_stop":
+                    await self.stop_conversation()
+                elif kind == "playback":
+                    self.on_playback(data.get("state"))
         except WebSocketDisconnect:
             pass
         finally:
@@ -167,21 +214,145 @@ class VoiceConversation:
             return
         await self.send_json({"type": "transcript_final", "text": transcript})
         if transcript:
-            self.turn_task = asyncio.create_task(self.respond(transcript, previous=self.turn_task))
+            self._start_turn(transcript)
+
+    def _start_turn(self, transcript: str) -> None:
+        task = asyncio.create_task(self.respond(transcript, previous=self.turn_task))
+        self.turn_task = task
+        task.add_done_callback(self._turn_finished)
+
+    def _turn_finished(self, task: asyncio.Task) -> None:
+        self._saved_turns.discard(task)
+        if task is self.turn_task and self.state == "responding":
+            self.state = "waiting"
 
     async def interrupt(self) -> None:
         """Coupe la VOIX du patient. Le texte de la réplique continue d'arriver et est
         enregistré : couper la parole ne fait jamais perdre un échange."""
-        if self.speaker is not None and await self.speaker.stop():
+        stopped = await self.speaker.stop() if self.speaker is not None else False
+        if stopped or self.playing:  # le navigateur peut encore jouer de l'audio reçu
+            self.playing = False
+            self.echo_until = time.monotonic() + ECHO_TAIL_SEC
             await self.send_json({"type": "interrupted"})
 
     async def close(self) -> None:
+        if self.stream is not None:
+            await self.stream.close()
         # Déconnexion : comme en SSE, un tour non terminé n'est pas enregistré
         if self.turn_task is not None and not self.turn_task.done():
             self.turn_task.cancel()
             await asyncio.wait([self.turn_task])
         if self.stt is not None:
             await self.stt.cancel()
+
+    # ---------- consultation mains libres ----------
+
+    async def start_conversation(self) -> None:
+        if self.stream is not None:
+            return
+        stream = STTStream(on_word=self._on_word, on_step=self._on_step, on_marker=self._on_marker)
+        stream.open()
+        try:
+            await stream.wait_ready()
+        except VoiceServiceError as e:
+            logger.warning("⚠️ Reconnaissance vocale indisponible : %s", e)
+            await stream.close()
+            await self.send_json({"type": "error", "status": 503, "message": STT_UNAVAILABLE})
+            return
+        self.stream = stream
+        self.state = "waiting"
+        self.steps_seen = 0
+        await self.send_json({"type": "listening"})
+
+    async def stop_conversation(self) -> None:
+        stream, self.stream = self.stream, None
+        if stream is not None:
+            await stream.close()
+        self.state = "idle"
+        self.utterance = []
+        await self.send_json({"type": "conversation_stopped"})
+
+    def on_playback(self, state: Optional[str]) -> None:
+        if state == "started":
+            self.playing = True
+        elif state == "ended":
+            self.playing = False
+            self.echo_until = time.monotonic() + ECHO_TAIL_SEC
+            self.barge_candidates = []
+
+    def _patient_audible(self) -> bool:
+        return self.playing or (self.speaker is not None and self.speaker.audible)
+
+    def _is_echo(self, word: str) -> bool:
+        """Le micro entend la voix du patient : on ignore les mots de sa propre réplique."""
+        if not (self._patient_audible() or time.monotonic() < self.echo_until):
+            return False
+        key = _echo_key(word)
+        return bool(key) and key in self.echo_vocab
+
+    async def _begin_utterance(self, words: list) -> None:
+        self.state = "user_speaking"
+        self.utterance = list(words)
+        self.steps_since_word = 0
+        await self.send_json({"type": "transcript_partial", "text": " ".join(self.utterance)})
+
+    async def _on_word(self, word: str) -> None:
+        if self._is_echo(word):
+            return
+        if self._patient_audible() and self.state not in ("user_speaking", "flushing"):
+            # L'étudiant parle pendant que le patient parle : il lui coupe la parole
+            self.barge_candidates.append(word)
+            if len(self.barge_candidates) < BARGE_IN_MIN_WORDS:
+                return
+            words, self.barge_candidates = self.barge_candidates, []
+            logger.info("🗣️ L'étudiant coupe la parole au patient")
+            await self.interrupt()
+            await self._begin_utterance(words)
+            return
+        if self.state == "responding":
+            task = self.turn_task
+            if task is not None and not task.done() and task not in self._saved_turns:
+                # Faux départ : l'étudiant reprend avant que le patient ait parlé.
+                # Rien n'est encore enregistré : on annule et on continue la même phrase.
+                task.cancel()
+                await asyncio.wait([task])
+                await self.send_json({"type": "turn_cancelled"})
+                await self._begin_utterance(self.last_utterance + [word])
+                return
+            await self.interrupt()
+            await self._begin_utterance([word])
+            return
+        if self.state == "waiting":
+            await self._begin_utterance([word])
+            return
+        if self.state in ("user_speaking", "flushing"):
+            self.utterance.append(word)
+            self.steps_since_word = 0
+            await self.send_json({"type": "transcript_partial", "text": " ".join(self.utterance)})
+
+    async def _on_step(self, pause_probability: float) -> None:
+        self.steps_seen += 1
+        if self.state != "user_speaking" or self.stream is None:
+            return
+        self.steps_since_word += 1
+        paused = self.steps_seen > PAUSE_WARMUP_STEPS and pause_probability > PAUSE_THRESHOLD
+        if paused or self.steps_since_word > ENDPOINT_FALLBACK_STEPS:
+            # Fin de phrase : marqueur + silence pour récupérer les derniers mots
+            self.state = "flushing"
+            self.marker_id += 1
+            self.stream.flush(self.marker_id)
+
+    async def _on_marker(self, marker_id: int) -> None:
+        if self.state != "flushing" or marker_id != self.marker_id:
+            return
+        text = " ".join(self.utterance).strip()
+        self.last_utterance, self.utterance = self.utterance, []
+        if not text:
+            self.state = "waiting"
+            return
+        self.state = "responding"
+        await self.send_json({"type": "transcript_final", "text": text})
+        self._start_turn(text)
 
     # ---------- une réplique du patient ----------
 
@@ -200,10 +371,13 @@ class VoiceConversation:
 
         speaker = _Speaker(self, self.voice)
         self.speaker = speaker
+        self.reply_text = ""
         try:
             async with aclosing(chat_routes._run_turn(turn, chat_routes._write_session)) as events:
                 async for kind, value in events:
                     if kind == "delta":
+                        self.reply_text += value
+                        self.echo_vocab = {_echo_key(w) for w in self.reply_text.split()} - {""}
                         await self.send_json({"type": "delta", "text": value})
                         await speaker.feed(value)
                     elif kind == "examiner_note":
@@ -214,6 +388,7 @@ class VoiceConversation:
                         await self.send_json({"type": "error", "status": status_code, "message": message})
                         return
                     elif kind == "done":
+                        self._saved_turns.add(asyncio.current_task())
                         if value.blocked:
                             # Message refusé : avertissement écrit, pas de voix
                             speaker.mark_done()
@@ -242,6 +417,7 @@ class _Speaker:
         self._available: Optional[bool] = None
         self._muted = False   # coupé par l'étudiant
         self._done = False    # plus aucune voix à venir pour cette réplique
+        self._audio_started = False
 
     async def _ready(self) -> bool:
         if self._muted:
@@ -260,6 +436,7 @@ class _Speaker:
     async def _forward_audio(self) -> None:
         try:
             async for pcm in self.tts.audio():
+                self._audio_started = True
                 await self.conversation.send_audio(pcm)
         except VoiceServiceError as e:
             logger.warning("⚠️ Synthèse vocale interrompue : %s", e)
@@ -283,6 +460,11 @@ class _Speaker:
         if self._pump is not None and not self._muted:
             with suppress(asyncio.CancelledError):
                 await asyncio.shield(self._pump)
+
+    @property
+    def audible(self) -> bool:
+        """La voix a commencé et n'est ni finie ni coupée (côté serveur)."""
+        return self._audio_started and not (self._muted or self._done)
 
     def mark_done(self) -> None:
         self._done = True

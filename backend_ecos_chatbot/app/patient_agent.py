@@ -211,13 +211,22 @@ def build_tools(ctx: CaseToolContext) -> List[Dict[str, Any]]:
     return tools
 
 
+ORAL_RULES = """RÉPONSE ORALE (ta réponse est lue à voix haute par une synthèse vocale) :
+- Parle comme on parle, pas comme on écrit : phrases courtes, mots simples, et de temps en temps une hésitation naturelle ("euh…", "ben…", "enfin…").
+- Écris les nombres et les unités en toutes lettres ("huit sur dix", "deux heures", "cinquante-huit ans").
+- Aucun symbole, abréviation, parenthèse, liste ni émoji."""
+
+
 def build_agent_system_instruction(
     patient_prompt: str,
     ctx: CaseToolContext,
     station_state: Sequence[str] = (),
+    oral: bool = False,
 ) -> str:
     """Prompt patient existant + règles d'usage des outils + déroulé de la station."""
     parts = [build_patient_system_instruction(patient_prompt)]
+    if oral:
+        parts.append(ORAL_RULES)
 
     rules = [
         "OUTILS (ils jouent le rôle de l'EXAMINATEUR, jamais le tien) :",
@@ -425,6 +434,7 @@ async def stream_patient_agent(
     student_message: str,
     ctx: CaseToolContext,
     station_state: Sequence[str] = (),
+    oral: bool = False,
     client: Optional[AsyncOpenAI] = None,
     model: Optional[str] = None,
     temperature: float = 0.4,
@@ -442,7 +452,7 @@ async def stream_patient_agent(
 
     tools = build_tools(ctx)
     messages: List[Dict[str, Any]] = [
-        {"role": "system", "content": build_agent_system_instruction(patient_prompt, ctx, station_state)},
+        {"role": "system", "content": build_agent_system_instruction(patient_prompt, ctx, station_state, oral)},
         *history_to_messages(history),
         {"role": "user", "content": student_message},
     ]

@@ -5,8 +5,24 @@
 
         <!-- Container principal avec messages et textbox -->
         <div style="display:flex; min-height:0; gap:1rem; flex-direction: column; padding:1rem; flex: 1;">
+            <!-- Consultation orale : pas de texte par défaut, la transcription reste enregistrée -->
+            <VoiceConsultation
+                v-if="consulting"
+                :status="consultationStatus"
+                :level="micLevel"
+                :muted="micMuted"
+                :show-transcript="showTranscript"
+                :examiner-notes="examinerNotes"
+                :notice="consultationNotice"
+                @toggle-mute="toggleMute"
+                @toggle-transcript="toggleTranscript"
+                @interrupt="voice.interrupt()"
+                @leave="leaveConsultation"
+            />
+
             <!-- Container des messages avec scroll automatique -->
             <div 
+                v-show="!consulting || showTranscript"
                 id="message-container" 
                 ref="messageContainer"
                 style="display: flex; flex-direction: column; min-height: 0; flex:1; overflow-y: auto; padding: .5rem;"
@@ -32,14 +48,14 @@
             </div>
 
             <!-- Le patient parle : possibilité de lui couper la parole -->
-            <div v-if="isPatientSpeaking" class="speaking-bar">
+            <div v-if="isPatientSpeaking && !consulting" class="speaking-bar">
                 <i class="pi pi-volume-up"></i>
                 <span>Le patient parle…</span>
                 <Button label="Couper" size="small" text severity="secondary" @click="voice.interrupt()" />
             </div>
 
             <!-- Saisie : clavier ou voix -->
-            <div class="input-row">
+            <div v-if="!consulting" class="input-row">
                 <Textbox 
                     style="padding:.5rem; flex: 1;" 
                     @send-message="handleSendMessage"
@@ -56,6 +72,16 @@
                     :title="micLabel"
                     @click="toggleTalking"
                 />
+                <Button
+                    class="mic-button"
+                    icon="pi pi-headphones"
+                    severity="secondary"
+                    outlined
+                    :disabled="isSendingMessage || voiceState !== 'idle'"
+                    aria-label="Consultation orale (mains libres)"
+                    title="Consultation orale : parlez librement au patient, sans bouton ni texte"
+                    @click="startConsultation"
+                />
             </div>
         </div>
     </div>
@@ -69,6 +95,7 @@ import ChatHeader from './components/ChatHeader.vue';
 import Message from './components/Message.vue';
 import Textbox from './components/Textbox.vue';
 import { readSSE } from './services/sse';
+import VoiceConsultation, { type ConsultationStatus } from './components/VoiceConsultation.vue';
 import { VoiceClient, type VoiceEvent } from './services/voice';
 
 // ============= INTERFACES =============
@@ -381,9 +408,77 @@ async function handleSendMessage(messageContent: string) {
 const voice = new VoiceClient(attemptId);
 const voiceState = ref<'idle' | 'connecting' | 'recording' | 'transcribing'>('idle');
 const isPatientSpeaking = ref(false);
-let speakingStudent: ChatMessage | null = null;   // bulle étudiant en cours de transcription
-const voiceTurns: Turn[] = [];                     // tours en attente de "done", dans l'ordre
+const speakingStudent = ref<ChatMessage | null>(null); // bulle étudiant en cours de transcription
+// Tours en attente de "done", dans l'ordre (le serveur les traite l'un après l'autre)
+const voiceTurns: { turn: Turn; student: ChatMessage }[] = [];
 let voiceUnavailableShown = false;
+
+// ----- Consultation orale (mains libres) -----
+const consulting = ref(false);
+const consultationConnecting = ref(false);
+const micLevel = ref(0);
+const micMuted = ref(false);
+const awaitingVoice = ref(false);
+const consultationNotice = ref<string | null>(null);
+const showTranscript = ref(readPreference());
+
+function readPreference(): boolean {
+    try {
+        return localStorage.getItem('ecos.voice.showTranscript') === '1';
+    } catch {
+        return false;
+    }
+}
+
+const consultationStatus = computed<ConsultationStatus>(() => {
+    if (consultationConnecting.value) return 'connecting';
+    if (isPatientSpeaking.value) return 'speaking';
+    if (speakingStudent.value) return 'user_speaking';
+    if (awaitingVoice.value) return 'thinking';
+    return 'listening';
+});
+
+const examinerNotes = computed(() => messages.value.filter(m => m.role === 'examiner'));
+
+voice.onLevel = (level) => { micLevel.value = micLevel.value * 0.5 + level * 0.5; };
+
+async function startConsultation() {
+    consulting.value = true;
+    consultationConnecting.value = true;
+    consultationNotice.value = null;
+    try {
+        await voice.startConversation();
+    } catch (error) {
+        consulting.value = false;
+        const reason = error instanceof Error ? error.message : 'erreur inconnue';
+        alert(`Consultation orale indisponible : ${reason}`);
+    } finally {
+        consultationConnecting.value = false;
+    }
+}
+
+function leaveConsultation() {
+    voice.stopConversation();
+    consulting.value = false;
+    micMuted.value = false;
+    voice.setMuted(false);
+    scrollToBottom();
+}
+
+function toggleMute() {
+    micMuted.value = !micMuted.value;
+    voice.setMuted(micMuted.value);
+}
+
+function toggleTranscript() {
+    showTranscript.value = !showTranscript.value;
+    try {
+        localStorage.setItem('ecos.voice.showTranscript', showTranscript.value ? '1' : '0');
+    } catch {
+        // préférence non mémorisée : sans conséquence
+    }
+    scrollToBottom();
+}
 
 const micIcon = computed(() => voiceState.value === 'recording' ? 'pi pi-stop-circle' : 'pi pi-microphone');
 const micLabel = computed(() => voiceState.value === 'recording'
@@ -403,7 +498,7 @@ async function toggleTalking() {
     try {
         voiceState.value = 'connecting';
         await voice.startTalking();
-        speakingStudent = pushMessage({
+        speakingStudent.value = pushMessage({
             id: crypto.randomUUID(),
             role: 'student',
             content: '',
@@ -420,16 +515,29 @@ async function toggleTalking() {
     }
 }
 
+function newPendingStudent(): ChatMessage {
+    return pushMessage({
+        id: crypto.randomUUID(),
+        role: 'student',
+        content: '',
+        created_at: new Date().toISOString(),
+        modality: 'voice',
+        pending: true,
+    });
+}
+
 function handleVoiceEvent(event: VoiceEvent) {
     switch (event.type) {
         case 'transcript_partial':
-            if (speakingStudent) speakingStudent.content = event.text as string;
+            // En mains libres, c'est le serveur qui détecte le début d'une phrase
+            speakingStudent.value ??= newPendingStudent();
+            speakingStudent.value.content = event.text as string;
             scrollToBottom();
             break;
         case 'transcript_final': {
             voiceState.value = 'idle';
-            const student = speakingStudent;
-            speakingStudent = null;
+            const student = speakingStudent.value;
+            speakingStudent.value = null;
             if (!student) break;
             const text = (event.text as string) || '';
             if (!text) {
@@ -439,42 +547,75 @@ function handleVoiceEvent(event: VoiceEvent) {
             }
             student.content = text;
             student.pending = false;
-            voiceTurns.push(startTurn(student.id, 'voice'));
+            consultationNotice.value = null;
+            awaitingVoice.value = true;
+            voiceTurns.push({ turn: startTurn(student.id, 'voice'), student });
+            break;
+        }
+        case 'turn_cancelled': {
+            // Faux départ : l'étudiant n'avait pas fini sa phrase ; elle continue
+            const last = voiceTurns.pop();
+            if (last) {
+                last.turn.fail();
+                last.student.pending = true;
+                speakingStudent.value = last.student;
+            }
+            awaitingVoice.value = false;
             break;
         }
         case 'delta':
-            voiceTurns[0]?.delta(event.text as string);
+            voiceTurns[0]?.turn.delta(event.text as string);
             break;
         case 'examiner_note':
-            voiceTurns[0]?.note(event as unknown as ExaminerNote);
+            voiceTurns[0]?.turn.note(event as unknown as ExaminerNote);
             break;
-        case 'done':
-            voiceTurns.shift()?.done(event as unknown as ChatResponse);
+        case 'done': {
+            const final = event as unknown as ChatResponse;
+            voiceTurns.shift()?.turn.done(final);
+            if (final.blocked) {
+                consultationNotice.value = final.patient_reply;
+                awaitingVoice.value = false;
+            }
+            break;
+        }
+        case 'audio_end':
+            awaitingVoice.value = false;
             break;
         case 'voice_unavailable':
+            awaitingVoice.value = false;
+            consultationNotice.value = event.message as string;
             if (!voiceUnavailableShown) pushNotice(event.message as string);
             voiceUnavailableShown = true;
             break;
-        case 'error':
-            if (speakingStudent) {
+        case 'error': {
+            const message = (event.message as string) || 'Erreur du mode vocal';
+            if (speakingStudent.value) {
                 // La transcription a échoué : rien n'a été envoyé
-                removeMessages([speakingStudent.id]);
-                speakingStudent = null;
+                removeMessages([speakingStudent.value.id]);
+                speakingStudent.value = null;
             } else {
-                voiceTurns.shift()?.fail();
+                voiceTurns.shift()?.turn.fail();
             }
             voiceState.value = 'idle';
             isPatientTyping.value = false;
-            pushNotice((event.message as string) || 'Erreur du mode vocal');
+            awaitingVoice.value = false;
+            consultationNotice.value = message;
+            pushNotice(message);
             break;
+        }
         case 'closed':
             voiceState.value = 'idle';
             isPatientSpeaking.value = false;
-            if (speakingStudent) {
-                removeMessages([speakingStudent.id]);
-                speakingStudent = null;
+            awaitingVoice.value = false;
+            if (speakingStudent.value) {
+                removeMessages([speakingStudent.value.id]);
+                speakingStudent.value = null;
             }
-            voiceTurns.splice(0).forEach(turn => turn.fail());
+            voiceTurns.splice(0).forEach(({ turn }) => turn.fail());
+            if (consulting.value) {
+                consulting.value = false;
+                pushNotice('La connexion vocale a été interrompue.');
+            }
             break;
     }
 }

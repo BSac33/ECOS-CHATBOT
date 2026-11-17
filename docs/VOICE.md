@@ -1,6 +1,16 @@
-# 🎙️ Mode vocal (« appuyer pour parler »)
+# 🎙️ Mode vocal
 
-L'étudiant parle au patient au micro, le patient lui répond à voix haute. Un tour vocal
+Deux façons de parler au patient :
+
+- **Consultation orale (mains libres)** — bouton casque 🎧. Le micro reste ouvert, l'étudiant
+  parle naturellement, le patient répond quand il a fini sa phrase, et l'étudiant peut lui
+  couper la parole en parlant. **Pas de texte à l'écran par défaut** : avatar du patient,
+  statut, niveau du micro et informations de l'examinateur (constantes, ECG…). La
+  transcription reste générée et enregistrée pour la correction, et peut être affichée.
+- **Appuyer pour parler** — bouton micro 🎤 dans la zone de saisie, avec le texte affiché :
+  utile dans un environnement bruyant.
+
+Un tour vocal
 suit **exactement le même chemin qu'un tour écrit** : arbitre en parallèle, agent patient
 avec outils, notes de l'examinateur, persistance (voir `docs/PATIENT_AGENT.md`). Seules
 l'entrée (reconnaissance vocale) et la sortie (synthèse vocale) changent.
@@ -30,7 +40,36 @@ haut-parleur ◄─ trames ──────┘        WordChunker ──mot à
 | `frontend/src/ChatView.vue` | Bouton micro, sous-titres, affichage commun écrit/vocal |
 | `voice/docker-compose.yml` | Serveurs Kyutai (moshi-server) |
 
-## Déroulé d'une prise de parole
+## Consultation orale (mains libres)
+
+```
+micro ouvert ──► STT en continu (une connexion pour toute la consultation)
+                    │ mots            │ probabilité de pause (Step.prs[2])
+                    ▼                 ▼
+             phrase en cours ──► pause > 0,6 (ou 2 s sans mot) ──► marqueur + silence
+                                                                    │ derniers mots
+                                                                    ▼
+                                                       transcription ──► tour (comme l'écrit)
+```
+
+| Situation | Comportement |
+|---|---|
+| L'étudiant finit sa phrase | Fin détectée par le modèle (probabilité de pause > **0,6**, seuil d'Unmute), ou au bout de 2 s sans nouveau mot ; marqueur + ~0,6 s de silence injecté pour récupérer les derniers mots sans attendre le délai du modèle en temps réel |
+| L'étudiant parle pendant que le patient parle | **2 mots** (hors écho) suffisent à couper la voix du patient ; ces mots commencent la nouvelle phrase. La réplique coupée reste enregistrée |
+| L'étudiant reprend avant que le patient ait parlé (faux départ) | La réponse en préparation est annulée (rien n'était enregistré) et la phrase continue : une seule question complète est enregistrée (`turn_cancelled`) |
+| Le micro entend la voix du patient (pas de casque) | **Filtre d'écho** : pendant la voix du patient et 1,5 s après, les mots reconnus qui figurent dans sa réplique sont ignorés |
+
+Le serveur ne sait pas quand le navigateur a fini de jouer l'audio reçu (la synthèse va plus
+vite que le temps réel) : le navigateur le lui signale (`playback started/ended`).
+
+**Casque recommandé.** La voix du patient est jouée par Web Audio, que l'annulation d'écho
+du navigateur ne couvre pas toujours ; le filtre d'écho compense, mais un casque reste le
+plus fiable.
+
+En mode vocal, le patient reçoit des consignes de **style oral** (phrases courtes,
+hésitations naturelles, nombres en toutes lettres, aucun symbole).
+
+## Déroulé d'une prise de parole (appuyer pour parler)
 
 1. **Clic sur le micro** → `{"type": "start"}`. Le serveur ouvre une connexion de
    reconnaissance vocale ; l'audio envoyé avant qu'elle soit prête est mis en file d'attente.
@@ -67,6 +106,8 @@ suivant attend que le précédent soit enregistré, pour que l'historique du pat
 
 | Sens | Message | Rôle |
 |---|---|---|
+| → | `{"type": "conversation_start"}` / `{"type": "conversation_stop"}` | consultation mains libres : micro ouvert en continu |
+| → | `{"type": "playback", "state": "started"\|"ended"}` | la voix du patient joue / s'est tue (navigateur) |
 | → | `{"type": "start"}` | début de prise de parole (coupe la voix du patient) |
 | → | binaire | audio du micro, PCM float32 little-endian, mono, 24 kHz |
 | → | `{"type": "stop"}` | fin de prise de parole |
@@ -77,6 +118,8 @@ suivant attend que le précédent soit enregistré, pour que l'historique du pat
 | ← | `delta`, `examiner_note`, `done`, `error` | comme le flux SSE de l'écrit |
 | ← | binaire | voix du patient, PCM float32 little-endian, mono, 24 kHz |
 | ← | `audio_end` / `interrupted` | fin de la voix / voix coupée |
+| ← | `turn_cancelled` | faux départ : la phrase de l'étudiant continue |
+| ← | `conversation_stopped` | micro fermé |
 | ← | `voice_unavailable {message}` | synthèse indisponible : la réplique reste écrite |
 
 Sécurité : authentification par le cookie `access_token` (comme le reste de l'API) et
@@ -100,8 +143,10 @@ KYUTAI_TTS_DEFAULT_VOICE=unmute-prod-website/developpeuse-3.wav
 ```
 
 Mémoire GPU indicative (chiffres d'Unmute) : STT ~2,5 Go, TTS ~5,3 Go. Le budget vLLM
-(0,55 + 0,25 de la L40S) laisse ~9 Go. `batch_size` dans les configs = nombre d'étudiants
-pouvant parler, ou de patients pouvant répondre, **en même temps**.
+(0,55 + 0,25 de la L40S) laisse ~9 Go. `batch_size` dans les configs = nombre de connexions
+simultanées : en reconnaissance, une **consultation orale** occupe une place pendant toute
+sa durée (une prise de parole « appuyer pour parler » seulement le temps de parler) ; en
+synthèse, une place par réplique en cours.
 
 En développement, le proxy Vite transmet le WebSocket (`ws: true` sur `/chat/attempts`).
 
@@ -132,16 +177,17 @@ pytest tests/test_kyutai_voice.py tests/test_voice_route.py
 ```
 
 Les tests utilisent de **faux serveurs Kyutai** (`tests/fake_kyutai.py`) qui parlent le vrai
-protocole (WebSocket, msgpack, clé d'API, marqueurs) : clients, découpage en mots, tour
-vocal complet, coupure de parole, message bloqué sans voix, synthèse ou reconnaissance
-indisponible, silence, tentative expirée, authentification et contrôle d'origine.
+protocole (WebSocket, msgpack, clé d'API, marqueurs) et simulent les pauses (probabilité de
+pause qui monte dans le silence, segments de parole successifs) : clients, découpage en
+mots, tour vocal complet, coupure de parole (bouton et voix), filtre d'écho, faux départ
+fusionné, fin de phrase de repli, message bloqué sans voix, services indisponibles,
+silence, tentative expirée, authentification et contrôle d'origine.
 
 ## Suite prévue
 
-- **Conversation continue** : fin de prise de parole détectée automatiquement grâce à la
-  détection sémantique du modèle (`Step.prs[2]`, probabilité de pause, déjà lue par
-  `STTSession.pause_probability`), sans bouton.
 - **Ce qui a vraiment été dit** : en cas de coupure, n'enregistrer que la partie
   prononcée (les messages `Text` de la synthèse donnent l'horodatage de chaque mot).
-- Option « masquer le texte du patient » pour entraîner l'écoute.
 - Voix de l'examinateur pour les résultats d'examen.
+- Long silence de l'étudiant : le patient pourrait relancer (« Docteur… ? »), comme Unmute
+  le fait après 7 s.
+- Régler les seuils (pause 0,6, 2 mots pour couper la parole) sur de vraies consultations.

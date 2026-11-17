@@ -4,6 +4,9 @@ Utilisés par les tests et par l'essai de bout en bout dans le navigateur, sans 
 
 - STT : renvoie des mots scriptés pendant que de l'audio « parlé » (non nul) arrive,
   puis renvoie le marqueur après ASR_DELAY_FRAMES trames supplémentaires (le délai du modèle).
+  Chaque segment de parole (séparé par SEGMENT_GAP_FRAMES trames de silence) prononce la
+  liste de mots suivante de `segments`. La probabilité de pause (Step.prs[2]) passe à 0,9
+  après `pause_after_frames` trames de silence suivant de la parole, comme le modèle réel.
 - TTS : renvoie une trame audio (bip à 440 Hz) par mot reçu, puis ferme après Eos.
 """
 from __future__ import annotations
@@ -18,6 +21,7 @@ from websockets.asyncio.server import ServerConnection, serve
 
 FRAME_SIZE = 1920
 ASR_DELAY_FRAMES = 6  # ~0,5 s, comme kyutai/stt-1b-en_fr
+SEGMENT_GAP_FRAMES = 6
 
 
 def _pack(data: dict) -> bytes:
@@ -27,8 +31,10 @@ def _pack(data: dict) -> bytes:
 class FakeKyutai:
     def __init__(self, words: Optional[List[str]] = None, frames_per_word: int = 2,
                  stt_error: Optional[str] = None, tts_error: Optional[str] = None,
-                 tts_frame_delay: float = 0.0):
-        self.words = words or ["Bonjour", "docteur."]
+                 tts_frame_delay: float = 0.0, segments: Optional[List[List[str]]] = None,
+                 pause_after_frames: int = 3):
+        self.segments = segments or [words or ["Bonjour", "docteur."]]
+        self.pause_after_frames = pause_after_frames
         self.frames_per_word = frames_per_word
         self.stt_error = stt_error
         self.tts_error = tts_error
@@ -70,30 +76,41 @@ class FakeKyutai:
             await ws.send(_pack({"type": "Error", "message": self.stt_error}))
             return
         await ws.send(_pack({"type": "Ready"}))
-        speech_frames, emitted, marker_id, after_marker = 0, 0, None, 0
+        segment, speech_frames, emitted = -1, 0, 0
+        silent_run, marker_id, after_marker = SEGMENT_GAP_FRAMES, None, 0
+
+        def words() -> List[str]:
+            return self.segments[min(segment, len(self.segments) - 1)] if segment >= 0 else []
+
         async for raw in ws:
             message = msgpack.unpackb(raw, raw=False)
             if message["type"] == "Audio":
                 self.stt_frames_received += 1
-                await ws.send(_pack({"type": "Step", "step_idx": self.stt_frames_received,
-                                     "prs": [0.0, 0.0, 0.1 if marker_id is None else 0.9, 0.0]}))
-                if any(abs(x) > 1e-4 for x in message["pcm"]):
+                if any(abs(x) > 0.01 for x in message["pcm"]):  # > -40 dBFS : parole
+                    if silent_run >= SEGMENT_GAP_FRAMES:  # nouveau segment de parole
+                        segment, speech_frames, emitted = segment + 1, 0, 0
+                    silent_run = 0
                     speech_frames += 1
-                    if emitted < len(self.words) and speech_frames >= (emitted + 1) * self.frames_per_word:
-                        await ws.send(_pack({"type": "Word", "text": self.words[emitted],
+                    if emitted < len(words()) and speech_frames >= (emitted + 1) * self.frames_per_word:
+                        await ws.send(_pack({"type": "Word", "text": words()[emitted],
                                              "start_time": speech_frames * 0.08}))
                         emitted += 1
+                else:
+                    silent_run += 1
+                pause = speech_frames > 0 and silent_run >= self.pause_after_frames
+                await ws.send(_pack({"type": "Step", "step_idx": self.stt_frames_received,
+                                     "prs": [0.0, 0.0, 0.9 if (pause or marker_id is not None) else 0.1, 0.0]}))
                 if marker_id is not None:
                     after_marker += 1
                     self.stt_frames_after_marker = after_marker
                     if after_marker >= ASR_DELAY_FRAMES:
-                        # Mots restants (le modèle rattrape son retard), puis le marqueur ;
-                        # rien si aucune parole n'a été entendue
-                        while speech_frames and emitted < len(self.words):
-                            await ws.send(_pack({"type": "Word", "text": self.words[emitted], "start_time": 0.0}))
+                        # Mots restants du segment (le modèle rattrape son retard), puis le
+                        # marqueur ; rien si aucune parole n'a été entendue
+                        while speech_frames and emitted < len(words()):
+                            await ws.send(_pack({"type": "Word", "text": words()[emitted], "start_time": 0.0}))
                             emitted += 1
                         await ws.send(_pack({"type": "Marker", "id": marker_id}))
-                        marker_id = None
+                        marker_id, after_marker = None, 0
             elif message["type"] == "Marker":
                 marker_id = message["id"]
 

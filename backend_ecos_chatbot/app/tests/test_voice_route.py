@@ -60,7 +60,8 @@ def arbiter_returning(verdict):
 @pytest.fixture
 def voice_app(world, monkeypatch):
     def setup(verdict=ALLOW, **kyutai_kwargs):
-        kyutai_kwargs.setdefault("words", ["Depuis", "quand", "avez-vous", "mal", "?"])
+        if "segments" not in kyutai_kwargs:
+            kyutai_kwargs.setdefault("words", ["Depuis", "quand", "avez-vous", "mal", "?"])
         kyutai = KyutaiThread(**kyutai_kwargs)
         cleanups.append(kyutai.stop)
         monkeypatch.setenv("KYUTAI_STT_URL", kyutai.server.url)
@@ -143,6 +144,22 @@ def test_push_to_talk_full_turn(voice_app, world, session):
         (ChatRole.student, "voice", "Depuis quand avez-vous mal ?"),
         (ChatRole.patient, "voice", REPLY),
     ]
+
+
+def test_voice_turn_asks_patient_for_oral_style(voice_app, world, monkeypatch):
+    client, _ = voice_app()
+    captured = {}
+
+    async def agent(**kwargs):
+        captured.update(kwargs)
+        yield ("delta", "Oui.")
+        yield ("done", PatientAgentResult(reply="Oui."))
+    monkeypatch.setattr(chat_routes, "stream_patient_agent", agent)
+    with client.websocket_connect(url(world)) as ws:
+        ws.receive_json()
+        speak(ws)
+        read_until(ws, "done")
+    assert captured["oral"] is True
 
 
 def test_case_voice_is_used(voice_app, world, session):
@@ -281,3 +298,139 @@ def test_rejects_other_users_attempt(voice_app, world, session):
     with pytest.raises(WebSocketDisconnect):
         with client.websocket_connect(url(world)) as ws:
             ws.receive_json()
+
+
+# ==================== Consultation mains libres ====================
+
+SEG_QUESTION = ["Depuis", "quand", "avez-vous", "mal", "?"]
+
+
+def converse(ws):
+    assert ws.receive_json()["type"] == "ready"
+    ws.send_json({"type": "conversation_start"})
+    read_until(ws, "listening")
+
+
+def say(ws, speech_frames=12, silence_frames=6):
+    """L'étudiant parle puis se tait (le faux STT prononce le segment suivant)."""
+    for _ in range(speech_frames):
+        ws.send_bytes(pcm_to_bytes(speech_frame()))
+    for _ in range(silence_frames):
+        ws.send_bytes(pcm_to_bytes([0.0] * 1920))
+
+
+def student_messages(session, world):
+    rows = session.exec(select(Message).where(Message.attempt_id == world["attempt"].id)
+                        .order_by(Message.created_at)).all()
+    return [(r.role, r.content) for r in rows]
+
+
+def test_hands_free_turn_without_button(voice_app, world, session):
+    client, _ = voice_app(segments=[SEG_QUESTION])
+    with client.websocket_connect(url(world)) as ws:
+        converse(ws)
+        say(ws)  # pas de "stop" : la fin de phrase est détectée par la pause
+        events = read_until(ws, "audio_end")
+    kinds = [k for k, _ in events]
+    assert next(d for k, d in events if k == "transcript_final")["text"] == "Depuis quand avez-vous mal ?"
+    assert "".join(d["text"] for k, d in events if k == "delta") == REPLY
+    assert kinds.count("audio") == 6
+    assert student_messages(session, world) == [
+        (ChatRole.student, "Depuis quand avez-vous mal ?"), (ChatRole.patient, REPLY)]
+
+
+def test_hands_free_barge_in_by_voice(voice_app, world, session):
+    client, _ = voice_app(segments=[SEG_QUESTION, ["Pardon", "je", "reprends"]], tts_frame_delay=0.3)
+    with client.websocket_connect(url(world)) as ws:
+        converse(ws)
+        say(ws)
+        read_until(ws, "audio")
+        ws.send_json({"type": "playback", "state": "started"})  # le navigateur joue la voix
+        say(ws)                                                 # l'étudiant parle par-dessus
+        events = read_until(ws, "transcript_final")
+        ws.send_json({"type": "playback", "state": "ended"})
+        read_until(ws, "done")
+    kinds = [k for k, _ in events]
+    assert "interrupted" in kinds
+    assert kinds.index("interrupted") < kinds.index("transcript_final")
+    assert events[-1][1]["text"] == "Pardon je reprends"
+    # La réplique coupée est enregistrée, puis le nouvel échange
+    assert student_messages(session, world) == [
+        (ChatRole.student, "Depuis quand avez-vous mal ?"), (ChatRole.patient, REPLY),
+        (ChatRole.student, "Pardon je reprends"), (ChatRole.patient, REPLY)]
+
+
+def test_hands_free_ignores_echo_of_patient_voice(voice_app, world, session):
+    echo = ["Ça", "a", "commencé", "devant"]  # le micro entend la voix du patient
+    client, _ = voice_app(segments=[SEG_QUESTION, echo, ["Vous", "fumez", "?"]], tts_frame_delay=0.05)
+    with client.websocket_connect(url(world)) as ws:
+        converse(ws)
+        say(ws)
+        read_until(ws, "audio")
+        ws.send_json({"type": "playback", "state": "started"})
+        say(ws)                                    # écho : ne doit ni couper ni compter
+        read_until(ws, "audio_end")
+        ws.send_json({"type": "playback", "state": "ended"})
+        say(ws)                                    # vraie question suivante
+        events = read_until(ws, "transcript_final")
+        read_until(ws, "done")
+    kinds = [k for k, _ in events]
+    assert "interrupted" not in kinds
+    assert events[-1][1]["text"] == "Vous fumez ?"
+    assert [c for r, c in student_messages(session, world) if r == ChatRole.student] == [
+        "Depuis quand avez-vous mal ?", "Vous fumez ?"]
+
+
+def test_hands_free_false_start_is_merged(voice_app, world, session, monkeypatch):
+    client, _ = voice_app(segments=[["Depuis", "quand"], ["avez-vous", "mal", "?"]])
+
+    async def slow_agent(**kwargs):
+        await asyncio.sleep(1.0)  # le patient réfléchit encore quand l'étudiant reprend
+        yield ("delta", "Oui.")
+        yield ("done", PatientAgentResult(reply="Oui."))
+    monkeypatch.setattr(chat_routes, "stream_patient_agent", slow_agent)
+
+    with client.websocket_connect(url(world)) as ws:
+        converse(ws)
+        say(ws, speech_frames=4, silence_frames=10)  # > 12 mesures : au-delà de l'échauffement
+        first = read_until(ws, "transcript_final")
+        say(ws, speech_frames=6)               # l'étudiant n'avait pas fini sa phrase
+        events = read_until(ws, "transcript_final")
+        read_until(ws, "done")
+    assert first[-1][1]["text"] == "Depuis quand"
+    assert "turn_cancelled" in [k for k, _ in events]
+    assert events[-1][1]["text"] == "Depuis quand avez-vous mal ?"
+    # Une seule question enregistrée, complète
+    assert student_messages(session, world) == [
+        (ChatRole.student, "Depuis quand avez-vous mal ?"), (ChatRole.patient, "Oui.")]
+
+
+def test_hands_free_fallback_endpoint_without_pause_prediction(voice_app, world):
+    client, _ = voice_app(segments=[SEG_QUESTION], pause_after_frames=10_000)  # le modèle ne prédit jamais la pause
+    with client.websocket_connect(url(world)) as ws:
+        converse(ws)
+        say(ws, silence_frames=30)
+        events = read_until(ws, "transcript_final")
+    assert events[-1][1]["text"] == "Depuis quand avez-vous mal ?"
+
+
+def test_hands_free_stt_unavailable(voice_app, world):
+    client, _ = voice_app(stt_error="at capacity")
+    with client.websocket_connect(url(world)) as ws:
+        ws.receive_json()
+        ws.send_json({"type": "conversation_start"})
+        events = read_until(ws, "error")
+    assert events[-1][1]["status"] == 503
+
+
+def test_hands_free_stop(voice_app, world, session):
+    client, _ = voice_app(segments=[SEG_QUESTION])
+    with client.websocket_connect(url(world)) as ws:
+        converse(ws)
+        ws.send_json({"type": "conversation_stop"})
+        read_until(ws, "conversation_stopped")
+        say(ws)  # micro fermé côté serveur : rien n'est transcrit
+        ws.send_json({"type": "conversation_start"})
+        events = read_until(ws, "listening")
+    assert [k for k, _ in events] == ["listening"]
+    assert session.exec(select(Message)).all() == []

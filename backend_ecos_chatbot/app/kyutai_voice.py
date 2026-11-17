@@ -289,6 +289,114 @@ class STTSession:
             self._marker.set()  # débloque l'envoi et finish(), même en cas d'erreur
 
 
+class STTStream:
+    """Reconnaissance en continu (consultation mains libres) : une seule connexion pour
+    toute la consultation. Les mots, les probabilités de pause et les marqueurs sont
+    remontés par des fonctions de rappel ; c'est l'appelant qui décide des fins de phrase.
+    """
+
+    # Silence injecté après un marqueur : délai du modèle (0,5 s) + marge (cf. Unmute)
+    FLUSH_FRAMES = int(0.5 * SAMPLE_RATE / FRAME_SIZE) + 2
+
+    def __init__(
+        self,
+        url: Optional[str] = None,
+        on_word: Optional[Callable[[str], Awaitable[None]]] = None,
+        on_step: Optional[Callable[[float], Awaitable[None]]] = None,
+        on_marker: Optional[Callable[[int], Awaitable[None]]] = None,
+        connect_timeout: float = 5.0,
+    ) -> None:
+        self.url = url or stt_url()
+        self.on_word = on_word
+        self.on_step = on_step
+        self.on_marker = on_marker
+        self.connect_timeout = connect_timeout
+        self.error: Optional[BaseException] = None
+        self.ready = asyncio.Event()
+        self.closed = asyncio.Event()
+        self._queue: asyncio.Queue = asyncio.Queue()
+        self._task: Optional[asyncio.Task] = None
+
+    def open(self) -> None:
+        self._task = asyncio.create_task(self._run())
+
+    async def wait_ready(self, timeout: float = 6.0) -> None:
+        """Attend la connexion ; lève VoiceServiceError si le serveur est injoignable."""
+        waiters = [asyncio.ensure_future(self.ready.wait()), asyncio.ensure_future(self.closed.wait())]
+        _, pending = await asyncio.wait(waiters, timeout=timeout, return_when=asyncio.FIRST_COMPLETED)
+        for waiter in pending:
+            waiter.cancel()
+        if not self.ready.is_set():
+            raise VoiceServiceError(f"STT : {self.error or 'pas de connexion'}")
+
+    def push_audio(self, samples: List[float]) -> None:
+        if samples and not self.closed.is_set():
+            self._queue.put_nowait(("audio", samples))
+
+    def flush(self, marker_id: int) -> None:
+        """Fin de phrase détectée : marqueur + silence, pour obtenir les derniers mots
+        sans attendre le délai du modèle en temps réel."""
+        self._queue.put_nowait(("marker", marker_id))
+        silence = [0.0] * FRAME_SIZE
+        for _ in range(self.FLUSH_FRAMES):
+            self._queue.put_nowait(("audio", silence))
+
+    async def close(self) -> None:
+        if self._task and not self._task.done():
+            self._task.cancel()
+            await asyncio.wait([self._task])
+
+    async def _run(self) -> None:
+        try:
+            async with connect(self.url, additional_headers=_headers(),
+                               open_timeout=self.connect_timeout, max_size=None) as ws:
+                await asyncio.wait_for(_wait_ready(ws, "STT"), self.connect_timeout)
+                self.ready.set()
+                receiver = asyncio.create_task(self._receive(ws))
+                try:
+                    while not receiver.done():
+                        getter = asyncio.ensure_future(self._queue.get())
+                        await asyncio.wait([getter, receiver], return_when=asyncio.FIRST_COMPLETED)
+                        if not getter.done():
+                            getter.cancel()
+                            break
+                        kind, payload = getter.result()
+                        if kind == "audio":
+                            await ws.send(_pack({"type": "Audio", "pcm": payload}))
+                        else:
+                            await ws.send(_pack({"type": "Marker", "id": payload}))
+                    if receiver.done() and receiver.exception():
+                        raise receiver.exception()
+                finally:
+                    receiver.cancel()
+                    await asyncio.wait([receiver])
+        except asyncio.CancelledError:
+            raise
+        except (OSError, ConnectionClosed, asyncio.TimeoutError, VoiceServiceError) as e:
+            self.error = e
+            logger.warning("⚠️ STT (continu) : %s: %s", type(e).__name__, e)
+        finally:
+            self.closed.set()
+
+    async def _receive(self, ws: ClientConnection) -> None:
+        async for raw in ws:
+            message = _unpack(raw)
+            kind = message.get("type")
+            if kind == "Word":
+                text = str(message.get("text", "")).strip()
+                if text and self.on_word:
+                    await self.on_word(text)
+            elif kind == "Step":
+                prs = message.get("prs") or []
+                if len(prs) > 2 and self.on_step:
+                    await self.on_step(float(prs[2]))
+            elif kind == "Marker":
+                if self.on_marker:
+                    await self.on_marker(int(message.get("id", 0)))
+            elif kind == "Error":
+                raise VoiceServiceError(str(message.get("message", "erreur STT")))
+
+
 # ==================== SYNTHÈSE VOCALE ====================
 
 class TTSSession:
