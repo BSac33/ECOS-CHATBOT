@@ -31,23 +31,45 @@
                 </div>
             </div>
 
-            <!-- Composant de saisie fixé en bas -->
-            <Textbox 
-                style="padding:.5rem;" 
-                @send-message="handleSendMessage"
-                :disabled="isSendingMessage"
-            />
+            <!-- Le patient parle : possibilité de lui couper la parole -->
+            <div v-if="isPatientSpeaking" class="speaking-bar">
+                <i class="pi pi-volume-up"></i>
+                <span>Le patient parle…</span>
+                <Button label="Couper" size="small" text severity="secondary" @click="voice.interrupt()" />
+            </div>
+
+            <!-- Saisie : clavier ou voix -->
+            <div class="input-row">
+                <Textbox 
+                    style="padding:.5rem; flex: 1;" 
+                    @send-message="handleSendMessage"
+                    :disabled="isSendingMessage || voiceState !== 'idle'"
+                />
+                <Button
+                    class="mic-button"
+                    :class="{ recording: voiceState === 'recording' }"
+                    :icon="micIcon"
+                    :severity="voiceState === 'recording' ? 'danger' : 'secondary'"
+                    :loading="voiceState === 'connecting' || voiceState === 'transcribing'"
+                    :disabled="isSendingMessage"
+                    :aria-label="micLabel"
+                    :title="micLabel"
+                    @click="toggleTalking"
+                />
+            </div>
         </div>
     </div>
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, nextTick } from 'vue';
+import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import { useRoute } from 'vue-router';
+import Button from 'primevue/button';
 import ChatHeader from './components/ChatHeader.vue';
 import Message from './components/Message.vue';
 import Textbox from './components/Textbox.vue';
 import { readSSE } from './services/sse';
+import { VoiceClient, type VoiceEvent } from './services/voice';
 
 // ============= INTERFACES =============
 
@@ -62,8 +84,12 @@ interface ChatMessage {
     created_at: string;
     attachment_id?: string | null;
     attachment_mime_type?: string | null;
+    // "text" ou "voice"
+    modality?: string;
     // Message étudiant refusé par les garde-fous (non transmis au patient)
     blocked?: boolean;
+    // Transcription vocale en cours
+    pending?: boolean;
 }
 
 /**
@@ -79,7 +105,7 @@ interface ExaminerNote {
 }
 
 /**
- * Format de réponse de l'API lors de l'envoi d'un message
+ * Fin d'un tour (événement "done") : réponse complète telle qu'enregistrée
  */
 interface ChatResponse {
     patient_reply: string;
@@ -143,6 +169,23 @@ async function scrollToBottom() {
 }
 
 /**
+ * Ajoute un message et renvoie son proxy réactif (pour le modifier ensuite)
+ */
+function pushMessage(message: ChatMessage): ChatMessage {
+    messages.value.push(message);
+    return messages.value[messages.value.length - 1]!;
+}
+
+function removeMessages(ids: string[]) {
+    messages.value = messages.value.filter(m => !ids.includes(m.id));
+}
+
+function pushNotice(content: string) {
+    pushMessage({ id: crypto.randomUUID(), role: 'system', content, created_at: new Date().toISOString() });
+    scrollToBottom();
+}
+
+/**
  * Charge l'historique complet des messages depuis le backend
  * Appelée au montage du composant
  */
@@ -175,9 +218,84 @@ async function loadMessages() {
     }
 }
 
+// ============= AFFICHAGE D'UN TOUR (commun écrit / vocal) =============
+
+interface Turn {
+    delta(text: string): void;
+    note(note: ExaminerNote): void;
+    done(final: ChatResponse): void;
+    /** Échec : rien n'a été enregistré, on retire la réponse partielle */
+    fail(): void;
+}
+
+/**
+ * Affichage progressif de la réplique du patient en réponse à un message étudiant.
+ * La bulle du patient est créée au premier morceau de texte ; les notes de
+ * l'examinateur arrivées avant sont affichées juste après elle.
+ */
+function startTurn(studentMessageId: string, modality: 'text' | 'voice'): Turn {
+    let patientMessage: ChatMessage | null = null;
+    let pendingNotes: ChatMessage[] = [];
+    const addedIds: string[] = [];
+
+    const add = (message: ChatMessage) => {
+        addedIds.push(message.id);
+        return pushMessage(message);
+    };
+    const ensurePatientBubble = (): ChatMessage => {
+        if (!patientMessage) {
+            isPatientTyping.value = false;
+            patientMessage = add({
+                id: crypto.randomUUID(),
+                role: 'patient',
+                content: '',
+                created_at: new Date().toISOString(),
+                modality,
+            });
+            pendingNotes.forEach(add);
+            pendingNotes = [];
+        }
+        return patientMessage;
+    };
+
+    isPatientTyping.value = true;
+    return {
+        delta(text) {
+            ensurePatientBubble().content += text;
+            scrollToBottom();
+        },
+        note(note) {
+            const message = examinerNoteToMessage(note);
+            if (patientMessage) add(message);
+            else pendingNotes.push(message);
+            scrollToBottom();
+        },
+        done(final) {
+            isPatientTyping.value = false;
+            if (final.blocked) {
+                // Le message n'entre pas dans le transcript : on le marque comme non transmis
+                // et on affiche l'avertissement comme message système (hors personnage).
+                const sent = messages.value.find(m => m.id === studentMessageId);
+                if (sent) sent.blocked = true;
+                add({ id: crypto.randomUUID(), role: 'system', content: final.patient_reply, created_at: new Date().toISOString() });
+            } else {
+                // Texte de référence tel qu'enregistré
+                ensurePatientBubble().content = final.patient_reply;
+            }
+            scrollToBottom();
+        },
+        fail() {
+            isPatientTyping.value = false;
+            removeMessages(addedIds);
+        },
+    };
+}
+
+// ============= MODE ÉCRIT (SSE) =============
+
 /**
  * Gère l'envoi d'un nouveau message depuis le composant Textbox
- * Implémente une mise à jour optimiste pour une UX réactive
+ * La réplique du patient arrive en flux (SSE) et s'affiche au fil de l'eau
  * 
  * @param messageContent - Le contenu du message saisi par l'étudiant
  */
@@ -186,25 +304,20 @@ async function handleSendMessage(messageContent: string) {
         return;
     }
     
+    let turn: Turn | null = null;
     try {
         isSendingMessage.value = true;
         
         // ===== MISE À JOUR OPTIMISTE =====
-        // Créer immédiatement le message de l'étudiant dans l'UI
-        // sans attendre la réponse du serveur
-        const studentMessage: ChatMessage = {
+        const studentMessage = pushMessage({
             id: crypto.randomUUID(), // ID temporaire
             role: 'student',
             content: messageContent,
-            created_at: new Date().toISOString()
-        };
-        
-        // Ajouter à l'array réactive (mise à jour immédiate de l'UI)
-        messages.value.push(studentMessage);
+            created_at: new Date().toISOString(),
+            modality: 'text',
+        });
         await scrollToBottom();
         
-        // ===== APPEL API EN STREAMING (SSE) =====
-        // L'indicateur de frappe reste affiché jusqu'au premier morceau de texte
         isPatientTyping.value = true;
         
         // POST /chat/attempts/{attemptId}/chat/stream
@@ -224,100 +337,145 @@ async function handleSendMessage(messageContent: string) {
             throw new Error(error.detail || 'Erreur lors de l\'envoi du message');
         }
         
-        // État du tour en cours (objet : modifié depuis les callbacks du flux)
-        const turn: {
-            patientMessage: ChatMessage | null;
-            pendingNotes: ChatMessage[];
-            addedIds: string[];
-            final: ChatResponse | null;
-            error: string | null;
-        } = { patientMessage: null, pendingNotes: [], addedIds: [], final: null, error: null };
-        
-        const pushMessage = (message: ChatMessage): ChatMessage => {
-            messages.value.push(message);
-            turn.addedIds.push(message.id);
-            // Récupérer le proxy réactif pour pouvoir modifier le message ensuite
-            return messages.value[messages.value.length - 1]!;
-        };
-        
-        // La bulle du patient est créée au premier morceau de texte ; les notes de
-        // l'examinateur arrivées avant sont affichées juste après elle.
-        const ensurePatientBubble = (): ChatMessage => {
-            if (!turn.patientMessage) {
-                isPatientTyping.value = false;
-                turn.patientMessage = pushMessage({
-                    id: crypto.randomUUID(),
-                    role: 'patient',
-                    content: '',
-                    created_at: new Date().toISOString()
-                });
-                turn.pendingNotes.forEach(pushMessage);
-                turn.pendingNotes = [];
-            }
-            return turn.patientMessage;
-        };
+        turn = startTurn(studentMessage.id, 'text');
+        const current = turn;
+        let finished = false;
+        let streamError: string | null = null;
         
         await readSSE(response, ({ event, data }) => {
             switch (event) {
                 case 'delta':
-                    ensurePatientBubble().content += (data as { text: string }).text;
-                    scrollToBottom();
+                    current.delta((data as { text: string }).text);
                     break;
-                case 'examiner_note': {
-                    const note = examinerNoteToMessage(data as ExaminerNote);
-                    if (turn.patientMessage) pushMessage(note);
-                    else turn.pendingNotes.push(note);
-                    scrollToBottom();
+                case 'examiner_note':
+                    current.note(data as ExaminerNote);
                     break;
-                }
                 case 'done':
-                    turn.final = data as ChatResponse;
+                    current.done(data as ChatResponse);
+                    finished = true;
                     break;
                 case 'error':
-                    turn.error = (data as { message?: string }).message ?? 'Erreur du patient simulé';
+                    streamError = (data as { message?: string }).message ?? 'Erreur du patient simulé';
                     break;
             }
         });
         
         // Échec ou flux coupé : rien n'a été enregistré, on retire la réponse partielle
-        if (turn.error || !turn.final) {
-            messages.value = messages.value.filter(m => !turn.addedIds.includes(m.id));
-            throw new Error(turn.error ?? 'La connexion a été interrompue avant la fin de la réponse');
+        if (!finished) {
+            current.fail();
+            throw new Error(streamError ?? 'La connexion a été interrompue avant la fin de la réponse');
         }
-        
-        // ===== MESSAGE BLOQUÉ PAR LES GARDE-FOUS =====
-        // Le message n'entre pas dans le transcript : on le marque comme non transmis
-        // et on affiche l'avertissement comme message système (hors personnage).
-        if (turn.final.blocked) {
-            const sent = messages.value.find(m => m.id === studentMessage.id);
-            if (sent) sent.blocked = true;
-            pushMessage({
-                id: crypto.randomUUID(),
-                role: 'system',
-                content: turn.final.patient_reply,
-                created_at: new Date().toISOString()
-            });
-            await scrollToBottom();
-            return;
-        }
-        
-        // ===== RÉPONSE DU PATIENT : texte de référence tel qu'enregistré =====
-        ensurePatientBubble().content = turn.final.patient_reply;
-        await scrollToBottom();
         
     } catch (error) {
         console.error('Erreur lors de l\'envoi du message:', error);
-        
-        // En cas d'erreur, on pourrait :
-        // - Retirer le message optimiste de l'array
-        // - Afficher un indicateur d'erreur sur le message
-        // - Permettre un retry
-        
         alert(`Erreur: ${error instanceof Error ? error.message : 'Erreur inconnue'}`);
         
     } finally {
         isSendingMessage.value = false;
         isPatientTyping.value = false;
+    }
+}
+
+// ============= MODE VOCAL (appuyer pour parler) =============
+
+const voice = new VoiceClient(attemptId);
+const voiceState = ref<'idle' | 'connecting' | 'recording' | 'transcribing'>('idle');
+const isPatientSpeaking = ref(false);
+let speakingStudent: ChatMessage | null = null;   // bulle étudiant en cours de transcription
+const voiceTurns: Turn[] = [];                     // tours en attente de "done", dans l'ordre
+let voiceUnavailableShown = false;
+
+const micIcon = computed(() => voiceState.value === 'recording' ? 'pi pi-stop-circle' : 'pi pi-microphone');
+const micLabel = computed(() => voiceState.value === 'recording'
+    ? 'Terminer et envoyer'
+    : 'Parler au patient (cliquer pour commencer, recliquer pour envoyer)');
+
+voice.onSpeakingChange = (speaking) => { isPatientSpeaking.value = speaking; };
+voice.onEvent = handleVoiceEvent;
+
+async function toggleTalking() {
+    if (voiceState.value === 'recording') {
+        voice.stopTalking();
+        voiceState.value = 'transcribing';
+        return;
+    }
+    if (voiceState.value !== 'idle') return;
+    try {
+        voiceState.value = 'connecting';
+        await voice.startTalking();
+        speakingStudent = pushMessage({
+            id: crypto.randomUUID(),
+            role: 'student',
+            content: '',
+            created_at: new Date().toISOString(),
+            modality: 'voice',
+            pending: true,
+        });
+        voiceState.value = 'recording';
+        scrollToBottom();
+    } catch (error) {
+        voiceState.value = 'idle';
+        const reason = error instanceof Error ? error.message : 'erreur inconnue';
+        alert(`Mode vocal indisponible : ${reason}`);
+    }
+}
+
+function handleVoiceEvent(event: VoiceEvent) {
+    switch (event.type) {
+        case 'transcript_partial':
+            if (speakingStudent) speakingStudent.content = event.text as string;
+            scrollToBottom();
+            break;
+        case 'transcript_final': {
+            voiceState.value = 'idle';
+            const student = speakingStudent;
+            speakingStudent = null;
+            if (!student) break;
+            const text = (event.text as string) || '';
+            if (!text) {
+                removeMessages([student.id]);
+                pushNotice("Je n'ai rien entendu. Vérifiez votre micro et réessayez.");
+                break;
+            }
+            student.content = text;
+            student.pending = false;
+            voiceTurns.push(startTurn(student.id, 'voice'));
+            break;
+        }
+        case 'delta':
+            voiceTurns[0]?.delta(event.text as string);
+            break;
+        case 'examiner_note':
+            voiceTurns[0]?.note(event as unknown as ExaminerNote);
+            break;
+        case 'done':
+            voiceTurns.shift()?.done(event as unknown as ChatResponse);
+            break;
+        case 'voice_unavailable':
+            if (!voiceUnavailableShown) pushNotice(event.message as string);
+            voiceUnavailableShown = true;
+            break;
+        case 'error':
+            if (speakingStudent) {
+                // La transcription a échoué : rien n'a été envoyé
+                removeMessages([speakingStudent.id]);
+                speakingStudent = null;
+            } else {
+                voiceTurns.shift()?.fail();
+            }
+            voiceState.value = 'idle';
+            isPatientTyping.value = false;
+            pushNotice((event.message as string) || 'Erreur du mode vocal');
+            break;
+        case 'closed':
+            voiceState.value = 'idle';
+            isPatientSpeaking.value = false;
+            if (speakingStudent) {
+                removeMessages([speakingStudent.id]);
+                speakingStudent = null;
+            }
+            voiceTurns.splice(0).forEach(turn => turn.fail());
+            break;
     }
 }
 
@@ -330,6 +488,10 @@ async function handleSendMessage(messageContent: string) {
  */
 onMounted(async () => {
     await loadMessages();
+});
+
+onBeforeUnmount(() => {
+    voice.close();
 });
 
 </script>
@@ -370,6 +532,37 @@ onMounted(async () => {
         opacity: 1;
         transform: translateY(-10px);
     }
+}
+
+/* Saisie : zone de texte + bouton micro */
+.input-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.mic-button {
+    width: 3.25rem;
+    height: 3.25rem;
+    flex-shrink: 0;
+}
+
+.mic-button.recording {
+    animation: pulse 1.2s infinite;
+}
+
+@keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.45); }
+    50% { box-shadow: 0 0 0 8px rgba(220, 53, 69, 0); }
+}
+
+.speaking-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0 0.75rem;
+    color: #495057;
+    font-size: 0.9rem;
 }
 
 /* Style du container de messages */

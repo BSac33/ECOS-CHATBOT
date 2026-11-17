@@ -139,6 +139,7 @@ def get_messages(attempt_id: UUID, session: Session = Depends(get_session), user
             "content": m.content,
             "attachment_id": str(m.attachment_id) if m.attachment_id else None,
             "attachment_mime_type": mime_types.get(m.attachment_id),
+            "modality": m.modality,
             "created_at": m.created_at.isoformat() if m.created_at else "",
         }
         for m in msgs
@@ -267,9 +268,11 @@ class _Turn:
     ctx: CaseToolContext
     use_agent: bool
     keyword_docs: list[DocumentRef] = field(default_factory=list)
+    modality: str = "text"  # "voice" pour un tour dit à l'oral
+    voice_id: str | None = None
 
 
-def _prepare_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: User) -> _Turn:
+def _prepare_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: User, modality: str = "text") -> _Turn:
     """Validations (erreurs HTTP classiques, avant tout flux) et lecture du contexte."""
     attempt = session.get(Attempts, attempt_id)
     
@@ -335,6 +338,8 @@ def _prepare_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: Use
         ctx=ctx,
         use_agent=use_agent,
         keyword_docs=[] if use_agent else _keyword_documents(ctx, payload.message, case.id, session),
+        modality=modality,
+        voice_id=case.voice_id,
     )
 
 
@@ -418,9 +423,11 @@ def _persist_exchange(session: Session, turn: _Turn, result: PatientAgentResult,
     def ts() -> datetime:
         return t0 + timedelta(microseconds=next(tick))
 
-    student_msg = Message(attempt_id=turn.attempt_id, role=ChatRole.student, content=turn.message, created_at=ts())
+    student_msg = Message(attempt_id=turn.attempt_id, role=ChatRole.student, content=turn.message,
+                          modality=turn.modality, created_at=ts())
     session.add(student_msg)
-    session.add(Message(attempt_id=turn.attempt_id, role=ChatRole.patient, content=result.reply, created_at=ts()))
+    session.add(Message(attempt_id=turn.attempt_id, role=ChatRole.patient, content=result.reply,
+                        modality=turn.modality, created_at=ts()))
 
     examiner_notes: list[ExaminerNoteOut] = []
     for event in result.events:

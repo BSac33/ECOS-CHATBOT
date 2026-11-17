@@ -1,10 +1,10 @@
 <template>
     <div class="message-wrapper" :class="alignmentClass">
-        <div class="message-bubble" :class="[bubbleClass, { 'bubble-blocked': message.blocked }]">
+        <div class="message-bubble" :class="[bubbleClass, { 'bubble-blocked': message.blocked, 'bubble-pending': message.pending }]">
             <span v-if="message.role === 'examiner'" class="message-label">
                 <i class="pi pi-clipboard"></i> Examinateur
             </span>
-            <p class="message-content">{{ message.content }}</p>
+            <p class="message-content">{{ message.pending && !message.content ? 'Je vous écoute…' : message.content }}</p>
             <template v-if="attachmentUrl">
                 <a v-if="isImage" :href="attachmentUrl" target="_blank" rel="noopener">
                     <img :src="attachmentUrl" :alt="message.content" class="message-attachment-preview" />
@@ -16,7 +16,10 @@
             <span v-if="message.blocked" class="message-blocked-note">
                 Message non transmis au patient
             </span>
-            <span class="message-timestamp">{{ formattedTime }}</span>
+            <span class="message-timestamp">
+                <i v-if="message.modality === 'voice'" class="pi pi-microphone" title="Échange à l'oral"></i>
+                {{ formattedTime }}
+            </span>
         </div>
     </div>
 </template>
@@ -32,7 +35,9 @@ interface ChatMessage {
     created_at: string;
     attachment_id?: string | null;
     attachment_mime_type?: string | null;
+    modality?: string;
     blocked?: boolean;
+    pending?: boolean;
 }
 
 // Props du composant
@@ -159,6 +164,17 @@ const formattedTime = computed(() => {
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.03em;
+}
+
+/* Transcription vocale en cours */
+.bubble-pending .message-content {
+    font-style: italic;
+    opacity: 0.75;
+}
+
+.message-timestamp .pi-microphone {
+    font-size: 0.7rem;
+    margin-right: 0.2rem;
 }
 
 .message-attachment-preview {

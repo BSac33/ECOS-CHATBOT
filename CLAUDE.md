@@ -104,6 +104,8 @@ alembic downgrade -1
 - `ai_chat_utils.py` - Gemini API integration for patient simulation
 - `vllm_chat_utils.py` - vLLM integration with structured output (Pydantic schemas)
 - `arbiter.py` - Fast student-message arbiter: lexical prefilter (instant block), LRU verdict cache, minimal LLM call (`{"category","tone"}` JSON, fixed system prompt for vLLM prefix caching, reused client, `ARBITER_TIMEOUT` then fail-open). Benchmark: `scripts/arbiter_bench.py`
+- `kyutai_voice.py` - Kyutai STT/TTS clients (moshi-server WebSocket + msgpack protocol, 24 kHz float32 PCM), `WordChunker` (LLM text deltas -> whole words for TTS)
+- `voice_routes.py` - Voice mode WebSocket `/chat/attempts/{id}/voice` (push-to-talk): STT -> shared `_run_turn` -> TTS word by word; barge-in cuts the voice only, the reply text is still persisted. See `docs/VOICE.md`
 - `patient_agent.py` - Patient agent with tool calling (examiner tools: `afficher_document`, `resultat_examen_clinique`, `signaler_hors_cadre`). Tool execution is pure; the route applies events only after the arbiter allows the message. See `docs/PATIENT_AGENT.md`
 - Uses **structured output** with Pydantic models to enforce JSON schema compliance
 
@@ -156,6 +158,7 @@ Body: {"case_id": 1}
 ```
 POST /chat/attempts/{id}/chat/stream   (SSE: delta / examiner_note / done / error — used by the frontend)
 POST /chat/attempts/{id}/chat          (same orchestration, full JSON response — used by the CLI)
+WS   /chat/attempts/{id}/voice         (voice mode: mic audio in, patient voice out, same orchestration)
 Body: {"message": "Bonjour, que puis-je faire pour vous?"}
 → Arbiter (vLLM 3B) and patient agent run IN PARALLEL; patient text is buffered
   until the arbiter verdict, then streamed (shared `_run_turn` in chat_routes.py)
@@ -309,6 +312,7 @@ Set `LLM_PROVIDER=vllm` in `fastapi.env` and configure vLLM endpoint. The code a
 - `docs/STRUCTURED_OUTPUT.md` - Pydantic structured output implementation
 - `docs/STATION_TYPES.md` - Station type definitions
 - `docs/PATIENT_AGENT.md` - Patient agent tool calling, guardrails, moderation events
+- `docs/VOICE.md` - Voice mode: architecture, WebSocket protocol, Kyutai servers (`voice/docker-compose.yml`), voices
 - `docs/ATTACHMENTS.md` - File attachment system
 - `docs/USER_ROUTES.md` - User API documentation
 - `docs/POSTGRESQL_SETUP.md` - Database setup guide
@@ -321,7 +325,7 @@ Set `LLM_PROVIDER=vllm` in `fastapi.env` and configure vLLM endpoint. The code a
 - `users` - Student/teacher/admin accounts
 - `clinical_cases` - ECOS station definitions
 - `attempts` - Student attempt sessions
-- `chat_messages` - Conversation transcripts (roles: system, student, patient, examiner)
+- `chat_messages` - Conversation transcripts (roles: system, student, patient, examiner; `modality` text|voice)
 - `moderation_events` - Student misconduct (blocked by arbiter or flagged by patient agent)
 - `evaluation_grids` - Assessment criteria (JSON column)
 - `evaluation_results` - Cached evaluation summaries

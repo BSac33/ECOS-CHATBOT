@@ -1,0 +1,52 @@
+# Reconnaissance vocale : kyutai/stt-1b-en_fr (français + anglais, ~1 Md de paramètres,
+# délai 0,5 s, détection sémantique de fin de phrase).
+# Adapté de kyutai-labs/unmute (services/moshi-server/configs/stt.toml, licence MIT).
+static_dir = "./static/"
+log_dir = "/tmp/moshi_logs"
+instance_name = "stt"
+# Clé partagée avec le backend (KYUTAI_API_KEY). À changer si le port est exposé.
+authorized_ids = ["public_token"]
+
+[modules.asr]
+path = "/api/asr-streaming"
+type = "BatchedAsr"
+lm_model_file = "hf://kyutai/stt-1b-en_fr-candle/model.safetensors"
+text_tokenizer_file = "hf://kyutai/stt-1b-en_fr-candle/tokenizer_en_fr_audio_8000.model"
+audio_tokenizer_file = "hf://kyutai/stt-1b-en_fr-candle/mimi-pytorch-e351c8d8@125.safetensors"
+asr_delay_in_tokens = 6
+# Nombre d'étudiants pouvant parler EN MÊME TEMPS. Plus grand = plus de mémoire GPU
+# et un peu plus de latence. Une connexion n'est ouverte que pendant la prise de parole.
+batch_size = 8
+conditioning_learnt_padding = true
+temperature = 0.25
+
+[modules.asr.model]
+audio_vocab_size = 2049
+text_in_vocab_size = 8001
+text_out_vocab_size = 8000
+audio_codebooks = 20
+
+[modules.asr.model.transformer]
+d_model = 2048
+num_heads = 16
+num_layers = 16
+dim_feedforward = 8192
+causal = true
+norm_first = true
+bias_ff = false
+bias_attn = false
+context = 750
+max_period = 100000
+use_conv_block = false
+use_conv_bias = true
+gating = "silu"
+norm = "RmsNorm"
+positional_embedding = "Rope"
+conv_layout = false
+conv_kernel_size = 3
+kv_repeat = 1
+max_seq_len = 40960
+
+[modules.asr.model.extra_heads]
+num_heads = 4
+dim = 6

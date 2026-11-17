@@ -22,6 +22,10 @@ pydantic==2.5.3
 google-genai
 openai>=1.0.0
 
+# Voix (reconnaissance et synthèse vocales Kyutai, protocole WebSocket + msgpack)
+websockets>=14.0
+msgpack>=1.0
+
 # file handling
 python-multipart
 boto3 

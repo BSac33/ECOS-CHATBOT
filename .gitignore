@@ -75,6 +75,7 @@ backend_ecos_chatbot/data/postgres/
 
 # Docker volumes and logs
 *.log
+voice/volumes/
 
 # ============= Database =============
 *.db

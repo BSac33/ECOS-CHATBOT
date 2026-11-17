@@ -1,0 +1,25 @@
+# Synthèse vocale : kyutai/tts-1.6b-en_fr (français + anglais).
+# Adapté de kyutai-labs/unmute (services/moshi-server/configs/tts.toml, licence MIT).
+static_dir = "./static/"
+log_dir = "/tmp/moshi_logs"
+instance_name = "tts"
+authorized_ids = ["public_token"]
+
+[modules.tts_py]
+type = "Py"
+path = "/api/tts_streaming"
+text_tokenizer_file = "hf://kyutai/tts-1.6b-en_fr/tokenizer_spm_8k_en_fr_audio.model"
+# Nombre de patients pouvant parler EN MÊME TEMPS (une connexion par réplique).
+batch_size = 4
+text_bos_token = 1
+
+[modules.tts_py.py]
+log_folder = "/tmp/moshi_logs"
+# Voix disponibles : dépôt Hugging Face kyutai/tts-voices (voix françaises : cml-tts/fr/,
+# unmute-prod-website/developpeuse-3.wav, unmute-prod-website/fabieng-enhanced-v2.wav)
+voice_folder = "hf-snapshot://kyutai/tts-voices/**/*.safetensors"
+default_voice = "unmute-prod-website/default_voice.wav"
+cfg_coef = 2.0
+cfg_is_no_text = true
+padding_between = 1
+n_q = 24

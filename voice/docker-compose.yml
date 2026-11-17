@@ -1,0 +1,58 @@
+# Serveurs vocaux Kyutai pour le mode vocal (« appuyer pour parler »).
+# Usage : cd voice && HUGGING_FACE_HUB_TOKEN=... docker compose up -d
+# Backend (fastapi.env) : KYUTAI_STT_URL=ws://<hôte>:8090  KYUTAI_TTS_URL=ws://<hôte>:8089
+#
+# Mémoire GPU indicative (chiffres d'Unmute) : STT ~2,5 Go, TTS ~5,3 Go, à ajuster selon
+# batch_size. Sur la L40S partagée avec vLLM (0,55 + 0,25), il reste ~9 Go : ça tient.
+services:
+  stt:
+    image: ecos-moshi-server:latest
+    build:
+      context: moshi-server
+    command: ["worker", "--config", "configs/stt.toml"]
+    container_name: kyutai-stt
+    ports:
+      - "8090:8080"
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - NVIDIA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ${HF_CACHE_DIR:-./volumes/hf-cache}:/root/.cache/huggingface
+      - ./volumes/cargo-registry-stt:/root/.cargo/registry
+      - ./volumes/stt-target:/app/target
+      - ./volumes/uv-cache:/root/.cache/uv
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  tts:
+    image: ecos-moshi-server:latest
+    build:
+      context: moshi-server
+    command: ["worker", "--config", "configs/tts.toml"]
+    container_name: kyutai-tts
+    ports:
+      - "8089:8080"
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+      - NVIDIA_VISIBLE_DEVICES=0
+      - CUDA_VISIBLE_DEVICES=0
+    volumes:
+      - ${HF_CACHE_DIR:-./volumes/hf-cache}:/root/.cache/huggingface
+      - ./volumes/cargo-registry-tts:/root/.cargo/registry
+      - ./volumes/tts-target:/app/target
+      - ./volumes/uv-cache:/root/.cache/uv
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

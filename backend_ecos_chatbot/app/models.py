@@ -109,6 +109,7 @@ class ClinicalCaseCreateIn(BaseModel):
     scenario_context: str
     patient_prompt: Optional[str] = None
     exam_findings: Optional[List[ExamFindingIn]] = None
+    voice_id: Optional[str] = None  # voix du patient (chemin dans kyutai/tts-voices)
     duration_seconds: int = 900  # 15 min par défaut
     status: str = "draft"  # "draft" | "published"
     # created_by sera ajouté automatiquement depuis l'auth
@@ -122,6 +123,7 @@ class ClinicalCaseUpdateIn(BaseModel):
     scenario_context: Optional[str] = None
     patient_prompt: Optional[str] = None
     exam_findings: Optional[List[ExamFindingIn]] = None
+    voice_id: Optional[str] = None
     duration_seconds: Optional[int] = None
     status: Optional[str] = None
 
@@ -135,6 +137,7 @@ class ClinicalCaseOut(BaseModel):
     scenario_context: str
     patient_prompt: Optional[str]
     exam_findings: Optional[List[dict]] = None
+    voice_id: Optional[str] = None
     duration_seconds: int
     status: str
     created_by: int
@@ -289,6 +292,10 @@ class ClinicalCase(SQLModel, table=True):
     # Format : [{"id": "constantes", "label": "Constantes vitales", "findings": "..."}]
     exam_findings: Optional[List[dict]] = Field(default=None, sa_column=Column(JSON, nullable=True))
     
+    # Voix du patient en mode vocal : chemin relatif au dépôt Hugging Face kyutai/tts-voices
+    # (ex. "cml-tts/fr/12977_10625_000037-0001.wav"). None = voix par défaut du serveur.
+    voice_id: Optional[str] = None
+    
     duration_seconds: int
     
     edn_items: List["EDNItem"] = Relationship(
@@ -366,6 +373,8 @@ class Message(SQLModel, table=True):
     attachment_id: Optional[UUID] = Field(foreign_key="attachments.id", default=None)
     created_at: datetime | None = Field(default_factory=datetime.now)
     is_active: bool = Field(default=True)
+    # "text" (saisi au clavier) ou "voice" (dit à l'oral / prononcé par la synthèse vocale)
+    modality: str = Field(default="text")
     
     
 class ModerationEvent(SQLModel, table=True):

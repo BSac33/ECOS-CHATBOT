@@ -13,6 +13,74 @@ os.environ.setdefault("SECRET_KEY", "test-secret")
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 
+# ---------- Base de test et cas clinique (partagés par les tests de routes) ----------
+
+import pytest  # noqa: E402
+from contextlib import contextmanager  # noqa: E402
+from datetime import datetime, timedelta  # noqa: E402
+
+
+@pytest.fixture
+def session():
+    """SQLite en mémoire par défaut ; TEST_DATABASE_URL=postgresql://... pour tester
+    sur une base PostgreSQL migrée (chaque test est annulé par rollback)."""
+    from sqlalchemy.pool import StaticPool
+    from sqlmodel import Session, SQLModel, create_engine
+
+    url = os.getenv("TEST_DATABASE_URL")
+    if url:
+        engine = create_engine(url)
+        with engine.connect() as conn:
+            outer = conn.begin()
+            with Session(bind=conn, join_transaction_mode="create_savepoint") as s:
+                yield s
+            outer.rollback()
+        engine.dispose()
+        return
+    engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    SQLModel.metadata.create_all(engine)
+    with Session(engine) as s:
+        yield s
+
+
+@pytest.fixture
+def world(session, monkeypatch):
+    import chat_routes
+    from models import Attachment, Attempts, ClinicalCase, StationType, User
+
+    monkeypatch.setenv("LLM_PROVIDER", "vllm")
+    monkeypatch.delenv("PATIENT_AGENT_ENABLED", raising=False)
+
+    # Le flux SSE écrit avec sa propre session : on la redirige vers la base de test
+    @contextmanager
+    def test_write_session():
+        yield session
+    monkeypatch.setattr(chat_routes, "_write_session", test_write_session)
+
+    user = User(username="etu", hashed_password="x")
+    session.add(user)
+    session.commit()
+    case = ClinicalCase(
+        title="Douleur thoracique", created_by=user.id, station_type=StationType.patient_interview,
+        student_instructions="Interrogez le patient", scenario_context="SCA",
+        patient_prompt="Tu es Mr. Dupont.", duration_seconds=600,
+        exam_findings=[{"id": "constantes", "label": "Constantes vitales", "findings": "PA 158/94 mmHg"}],
+    )
+    session.add(case)
+    session.commit()
+    att = Attachment(
+        case_id=case.id, filename="ecg.png", stored_filename="x.png", display_name="ECG 18 dérivations",
+        kind="image", mime_type="image/png", size_bytes=10, file_path="x.png", file_url="/files/x.png",
+        trigger_keywords="ecg",
+    )
+    attempt = Attempts(user_id=user.id, case_id=case.id, created_at=datetime.utcnow(),
+                       expires_at=datetime.utcnow() + timedelta(minutes=10))
+    session.add(att)
+    session.add(attempt)
+    session.commit()
+    return {"user": user, "case": case, "attachment": att, "attempt": attempt}
+
+
 # ---------- Faux client OpenAI-compatible ----------
 
 def tool_call(name: str, arguments: str, call_id: str = "call_1"):

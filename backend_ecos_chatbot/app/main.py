@@ -13,6 +13,7 @@ import os
 import dotenv
 from models import ClinicalCase, ClinicalCaseCreateIn, EDNItem, DisciplineItem, CaseEdnLink, CaseDisciplineLink, EdnDisciplineLink, User, UserRole
 from chat_routes import router as chat_router
+from voice_routes import router as voice_router
 from attachment_routes import router as attachment_router
 from evaluation_routes import router as evaluation_router
 from user_routes import router as user_router
@@ -59,6 +60,7 @@ logger.propagate = True
 
 # Inclure les routers
 app.include_router(chat_router, prefix="/chat", tags=["chat"])
+app.include_router(voice_router, prefix="/chat", tags=["voice"])  # WebSocket /chat/attempts/{id}/voice
 app.include_router(attachment_router, tags=["attachments"])
 app.include_router(evaluation_router, prefix="/evaluation", tags=["evaluation"])
 app.include_router(user_router, prefix="/api/users", tags=["users"])

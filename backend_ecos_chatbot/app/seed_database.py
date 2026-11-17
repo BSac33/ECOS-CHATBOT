@@ -198,6 +198,10 @@ Reste naturel et humain. Tu as peur mais tu fais confiance au médecin.""",
             },
         ],
         
+        # Voix masculine française pour le mode vocal ; à remplacer après écoute par une
+        # voix plus âgée du dossier cml-tts/fr du dépôt kyutai/tts-voices
+        voice_id="unmute-prod-website/fabieng-enhanced-v2.wav",
+        
         duration_seconds=360  # 6 minutes
     )
     

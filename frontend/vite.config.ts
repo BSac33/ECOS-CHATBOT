@@ -25,6 +25,7 @@ export default defineConfig({
       '/chat/attempts': {
         target: 'http://fastapi:8000',
         changeOrigin: true,
+        ws: true, // mode vocal : WebSocket /chat/attempts/{id}/voice
       },
       // Rediriger les requêtes /auth vers le backend
       '/auth': {
