@@ -14,6 +14,9 @@ publication crée une version figée : une tentative garde la version qu'elle a 
   POST   /authoring/cases/{id}/test          tentative de test du brouillon (enseignant)
   GET    /authoring/reference/items          items EDN connus
   GET    /authoring/reference/situations     situations de départ (celles des items en premier)
+  POST   /authoring/cases/{id}/assist        propositions de l'assistant (« Générer »)
+  GET    /authoring/corpus/search            extraits du corpus officiel (?q=...&items=339,230)
+  GET    /authoring/corpus/objectives        objectifs hiérarchisés des items (?items=339)
 """
 from __future__ import annotations
 
@@ -25,7 +28,9 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
+import authoring_assistant
 import case_publishing
+import corpus
 from auth import check_authorization
 from case_sheet import CaseSheet, Issue, blocking, check_sheet, compile_case
 from db import get_session
@@ -228,7 +233,7 @@ def reference_items(session: Session = Depends(get_session), user: User = Depend
 @router.get("/reference/situations")
 def reference_situations(items: str = "", session: Session = Depends(get_session), user: User = Depends(teacher)):
     """Situations de départ ; celles liées aux items donnés (ex. ?items=339,230) d'abord."""
-    numbers = [int(x) for x in items.split(",") if x.strip().isdigit()]
+    numbers = _numbers(items)
     linked = set()
     if numbers:
         links = session.exec(select(ItemSituationLink).where(ItemSituationLink.item_number.in_(numbers))).all()
@@ -236,3 +241,55 @@ def reference_situations(items: str = "", session: Session = Depends(get_session
     situations = session.exec(select(StartingSituation).order_by(StartingSituation.number)).all()
     out = [{"number": s.number, "title": s.title, "linked": s.number in linked} for s in situations]
     return sorted(out, key=lambda s: (not s["linked"], s["number"]))
+
+
+def _numbers(items: str) -> List[int]:
+    return [int(x) for x in items.split(",") if x.strip().isdigit()]
+
+
+class CorpusHitOut(BaseModel):
+    chunk_id: int
+    label: str
+    item_number: Optional[int]
+    section: str
+    rank: Optional[str]
+    kind: str
+    text: str
+    url: str
+    score: float
+
+
+@router.get("/corpus/search", response_model=List[CorpusHitOut])
+def corpus_search(q: str, items: str = "", kinds: str = "", limit: int = 6,
+                  session: Session = Depends(get_session), user: User = Depends(teacher)):
+    hits = corpus.search_corpus(session, q, items=_numbers(items),
+                                kinds=[k for k in kinds.split(",") if k] or None, limit=min(limit, 20))
+    return [CorpusHitOut(chunk_id=h.chunk_id, label=h.label, item_number=h.item_number, section=h.section,
+                         rank=h.rank, kind=h.kind, text=h.text, url=h.url, score=h.score) for h in hits]
+
+
+@router.get("/corpus/objectives")
+def corpus_objectives(items: str, session: Session = Depends(get_session), user: User = Depends(teacher)):
+    return [{"chunk_id": o.id, "item_number": o.item_number, "rank": o.rank, "rubric": o.section,
+             "text": o.text, "url": o.url} for o in corpus.objectives(session, _numbers(items))]
+
+
+class AssistIn(BaseModel):
+    task: authoring_assistant.Task
+    instructions: str = ""
+    sheet: Optional[CaseSheet] = None      # fiche en cours d'édition (non enregistrée)
+
+
+@router.post("/cases/{case_id}/assist", response_model=authoring_assistant.Proposal)
+async def assist(case_id: int, payload: AssistIn, session: Session = Depends(get_session), user: User = Depends(teacher)):
+    """Propositions à relire ; la fiche n'est pas modifiée (l'éditeur ajoute ce que l'enseignant accepte)."""
+    case = _own_case(session, case_id, user)
+    sheet = payload.sheet or _sheet(case)
+    if sheet is None:
+        raise HTTPException(400, "Ce cas n'a pas de fiche.")
+    try:
+        return await authoring_assistant.assist(sheet, payload.task, session=session, instructions=payload.instructions)
+    except authoring_assistant.AssistantInputError as exc:
+        raise HTTPException(422, str(exc))
+    except authoring_assistant.AssistantError as exc:
+        raise HTTPException(502, str(exc))

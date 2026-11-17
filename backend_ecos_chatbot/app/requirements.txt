@@ -26,6 +26,9 @@ openai>=1.0.0
 websockets>=14.0
 msgpack>=1.0
 
+# Corpus officiel (import des chapitres HTML)
+beautifulsoup4>=4.12
+
 # file handling
 python-multipart
 boto3 

@@ -257,3 +257,22 @@ async def test_reference_situations(client, session):
     assert [(s["number"], s["linked"]) for s in r.json()] == [(161, True), (12, False)]
     r = await client.get("/authoring/reference/items")
     assert r.json() == [{"number": 339, "title": "Syndromes coronariens aigus"}]
+
+
+@pytest.mark.asyncio
+async def test_corpus_routes(client, session):
+    from pathlib import Path
+
+    from corpus import parse_sfc_chapter, store_chapter
+
+    html = (Path(__file__).parent / "fixtures" / "sfc_chapter_fictif.html").read_text(encoding="utf-8")
+    store_chapter(session, parse_sfc_chapter(html, "https://example.org/chapitre-99/"))
+    session.commit()
+
+    r = await client.get("/authoring/corpus/search", params={"q": "tabagisme", "items": "999"})
+    assert r.status_code == 200 and r.json()[0]["label"].startswith("Item 999")
+    r = await client.get("/authoring/corpus/objectives", params={"items": "999"})
+    assert [o["rank"] for o in r.json()] == ["A", "A", "B"]
+
+    client.as_user("etu")
+    assert (await client.get("/authoring/corpus/search", params={"q": "x"})).status_code == 403
