@@ -1,0 +1,168 @@
+# Serveur de modèles d'ECOS Chatbot, à déployer sur la DMZ (machine GPU).
+#
+#   patient   vLLM  Qwen/Qwen3-8B              agent patient, évaluation, assistant de rédaction
+#   arbitre   vLLM  Qwen/Qwen2.5-3B-Instruct   filtre rapide des messages étudiants
+#   stt, tts  Kyutai moshi-server              mode vocal (facultatif : profil « voix »)
+#   gateway   nginx                            seul port exposé : HTTPS + clé d'API + liste d'IP
+#
+# Les services de modèles n'ont aucun port publié : seul « gateway » est joignable depuis
+# l'extérieur, et seulement depuis le serveur de l'application (APP_SERVER_CIDR).
+#
+#   cd deploy/dmz
+#   cp .env.example .env            # puis éditer (clé, IP du serveur applicatif, GPU)
+#   mkdir -p certs                  # fullchain.pem + privkey.pem (PKI de l'IHU ou voir README)
+#   docker compose up -d --build
+#   docker compose ps               # premier démarrage long : téléchargements + compilation
+#
+# Détails, dimensionnement, mode hors ligne : README.md (même dossier) et docs/DEPLOYMENT.md.
+name: ecos-modeles
+
+services:
+  vllm-patient:
+    image: vllm/vllm-openai:${VLLM_TAG:-v0.11.0}
+    restart: unless-stopped
+    ipc: host
+    environment:
+      # vLLM exige cette clé sur /v1 (défense en profondeur derrière la passerelle)
+      VLLM_API_KEY: ${MODELS_API_KEY:?définir MODELS_API_KEY dans .env}
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      HF_HUB_OFFLINE: ${OFFLINE:-0}
+    volumes:
+      - ${HF_CACHE_DIR:-./data/hf-cache}:/root/.cache/huggingface
+    command:
+      - --model=${PATIENT_MODEL:-Qwen/Qwen3-8B}
+      - --dtype=bfloat16
+      - --max-model-len=${PATIENT_MAX_MODEL_LEN:-32768}
+      # Une L40S (48 Go) pour tout : patient 0,55 + arbitre 0,25 + voix ~8 Go
+      - --gpu-memory-utilization=${PATIENT_GPU_MEMORY:-0.55}
+      - --enable-prefix-caching
+      # Outils de l'agent patient (examen clinique, documents, signalements), format Hermes
+      - --enable-auto-tool-choice
+      - --tool-call-parser=hermes
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${PATIENT_GPU:-0}"]
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30m   # premier démarrage : ~16 Go de poids à télécharger
+    networks: [modeles]
+
+  vllm-arbitre:
+    image: vllm/vllm-openai:${VLLM_TAG:-v0.11.0}
+    restart: unless-stopped
+    ipc: host
+    environment:
+      VLLM_API_KEY: ${MODELS_API_KEY:?définir MODELS_API_KEY dans .env}
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      HF_HUB_OFFLINE: ${OFFLINE:-0}
+    volumes:
+      - ${HF_CACHE_DIR:-./data/hf-cache}:/root/.cache/huggingface
+    command:
+      - --model=${ARBITER_MODEL:-Qwen/Qwen2.5-3B-Instruct}
+      - --dtype=float16
+      - --max-model-len=8192
+      - --gpu-memory-utilization=${ARBITER_GPU_MEMORY:-0.25}
+      - --enable-prefix-caching
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${ARBITER_GPU:-0}"]
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20m
+    # Démarrages successifs : chaque vLLM mesure la mémoire libre au lancement
+    depends_on:
+      vllm-patient:
+        condition: service_healthy
+    networks: [modeles]
+
+  # ---------- Mode vocal (profil « voix », activé par COMPOSE_PROFILES=voix dans .env) ----------
+  stt:
+    profiles: [voix]
+    image: ecos-moshi-server:latest
+    build: ../../voice/moshi-server
+    command: ["worker", "--config", "configs/stt.toml"]
+    restart: unless-stopped
+    environment: &kyutai-env
+      HUGGING_FACE_HUB_TOKEN: ${HUGGING_FACE_HUB_TOKEN:-}
+      HF_HUB_OFFLINE: ${OFFLINE:-0}
+      UV_OFFLINE: ${OFFLINE:-0}
+    volumes:
+      - ${HF_CACHE_DIR:-./data/hf-cache}:/root/.cache/huggingface
+      - ./data/kyutai/cargo-registry:/root/.cargo/registry
+      - ./data/kyutai/stt-target:/app/target      # binaire moshi-server compilé (1er démarrage)
+      - ./data/kyutai/uv-cache:/root/.cache/uv
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${VOICE_GPU:-0}"]
+              capabilities: [gpu]
+    # Après les vLLM, qui réservent leur part de mémoire GPU au démarrage
+    depends_on:
+      vllm-arbitre:
+        condition: service_healthy
+    networks: [modeles]
+
+  tts:
+    profiles: [voix]
+    image: ecos-moshi-server:latest
+    build: ../../voice/moshi-server
+    command: ["worker", "--config", "configs/tts.toml"]
+    restart: unless-stopped
+    environment: *kyutai-env
+    volumes:
+      - ${HF_CACHE_DIR:-./data/hf-cache}:/root/.cache/huggingface
+      - ./data/kyutai/cargo-registry:/root/.cargo/registry
+      - ./data/kyutai/tts-target:/app/target
+      - ./data/kyutai/uv-cache:/root/.cache/uv
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${VOICE_GPU:-0}"]
+              capabilities: [gpu]
+    depends_on:
+      vllm-arbitre:
+        condition: service_healthy
+    networks: [modeles]
+
+  # ---------- Passerelle : seul point d'entrée ----------
+  gateway:
+    image: nginx:${NGINX_TAG:-1.28-alpine}
+    restart: unless-stopped
+    ports:
+      - "${GATEWAY_PORT:-443}:443"
+    environment:
+      MODELS_API_KEY: ${MODELS_API_KEY:?définir MODELS_API_KEY dans .env}
+      APP_SERVER_CIDR: ${APP_SERVER_CIDR:?définir APP_SERVER_CIDR dans .env}
+      # Seules ces variables sont remplacées dans le gabarit (les $variables nginx restent)
+      NGINX_ENVSUBST_FILTER: "^(MODELS_API_KEY|APP_SERVER_CIDR)$"
+    volumes:
+      - ./gateway/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - ./gateway/snippets:/etc/nginx/snippets:ro
+      - ./certs:/etc/nginx/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "--no-check-certificate", "https://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks: [modeles]
+
+networks:
+  modeles:

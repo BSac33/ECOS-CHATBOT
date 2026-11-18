@@ -1,0 +1,75 @@
+# Déploiement de l'application (sans les modèles : voir deploy/dmz/ pour vLLM et Kyutai).
+#
+#   cp backend_ecos_chatbot/fastapi.env.production.example backend_ecos_chatbot/fastapi.env   # puis éditer
+#   cp backend_ecos_chatbot/postgres.env.example backend_ecos_chatbot/postgres.env             # puis éditer
+#   docker compose -f docker-compose.prod.yml up -d --build
+#   docker compose -f docker-compose.prod.yml exec api python scripts/create_user.py admin --role admin
+#   docker compose -f docker-compose.prod.yml exec api python seed_database.py   # cas d'exemple + packs privés
+#
+# Site : http://<hôte>:${WEB_PORT:-8080} (mettre un reverse proxy HTTPS devant en production,
+# avec SECURE_COOKIES=True dans fastapi.env).
+name: ecos
+
+services:
+  database:
+    image: postgres:16-alpine
+    env_file: ./backend_ecos_chatbot/postgres.env
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  # Migrations Alembic, à chaque démarrage (idempotent)
+  migrate:
+    image: ecos-api:latest
+    build: ./backend_ecos_chatbot/app
+    env_file: ./backend_ecos_chatbot/fastapi.env
+    command: ["alembic", "upgrade", "head"]
+    depends_on:
+      database:
+        condition: service_healthy
+    restart: "no"
+
+  api:
+    image: ecos-api:latest
+    env_file: ./backend_ecos_chatbot/fastapi.env
+    command: >-
+      uvicorn main:app --host 0.0.0.0 --port 8000
+      --proxy-headers --forwarded-allow-ips=*
+      --workers ${API_WORKERS:-2}
+    volumes:
+      - api_storage:/app/storage
+      # Packs privés de stations (contenu protégé, jamais dans l'image ni dans git)
+      - ./backend_ecos_chatbot/app/private:/app/private:ro
+      # Passerelle des modèles signée par l'AC de l'IHU : bundle système + AC, puis
+      # SSL_CERT_FILE=/etc/ssl/ecos/ca-bundle.pem dans fastapi.env (docs/DEPLOYMENT.md)
+      # - ./backend_ecos_chatbot/ca-bundle.pem:/etc/ssl/ecos/ca-bundle.pem:ro
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs', timeout=5)"]
+      interval: 15s
+      timeout: 6s
+      retries: 5
+
+  web:
+    image: ecos-web:latest
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  db_data:
+  api_storage:

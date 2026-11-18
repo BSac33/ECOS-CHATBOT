@@ -1,0 +1,7 @@
+# Jamais dans une image : contenus protégés (packs privés) et données d'exécution
+private/
+storage/
+__pycache__/
+*.pyc
+.pytest_cache/
+tests/

@@ -29,7 +29,6 @@
 </template>
 
 <script setup lang="ts">
-import { defineProps } from 'vue';
 import Button from 'primevue/button';
 
 defineProps<{

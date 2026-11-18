@@ -32,10 +32,6 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 router = APIRouter()
-api_key = os.getenv("GEMINI_API_KEY")
-
-if not api_key:
-    raise RuntimeError("GEMINI_API_KEY environment variable not set")
 
 @router.get("/cases/{case_id}/active-attempt", response_model=AttemptOut | None)
 async def get_active_attempt(case_id: int, session: Session = Depends(get_session), user: User = Depends(check_authorization())):

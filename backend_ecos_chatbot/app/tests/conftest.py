@@ -6,7 +6,6 @@ from types import SimpleNamespace
 
 # Variables lues à l'import des modules de l'app
 os.environ.setdefault("DATABASE_URL", "sqlite://")
-os.environ.setdefault("GEMINI_API_KEY", "test-key")
 os.environ.setdefault("SECRET_KEY", "test-secret")
 
 # Les modules de l'app s'importent à plat (from models import ...)

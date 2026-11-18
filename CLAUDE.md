@@ -31,6 +31,17 @@ make corpus
 make stations
 ```
 
+### Production / deployment (see `docs/DEPLOYMENT.md`)
+```bash
+# Application (PostgreSQL + API + nginx serving the built frontend), no GPU
+docker compose -f docker-compose.prod.yml up -d --build
+docker compose -f docker-compose.prod.yml exec api python scripts/create_user.py admin --role admin
+
+# Models on the GPU machine (DMZ): vLLM patient + arbiter, Kyutai STT/TTS (profile "voix"),
+# nginx gateway (TLS, single API key, IP allowlist); the app reaches them over HTTPS/WSS
+cd deploy/dmz && cp .env.example .env && docker compose up -d --build
+```
+
 ### Backend
 ```bash
 # Start backend services (PostgreSQL + FastAPI)
@@ -249,17 +260,20 @@ DATABASE_URL=postgresql://user:pass@database:5432/dbname
 SECRET_KEY=your-secret-key
 CORS_ORIGINS=http://localhost:5173,http://localhost:3000
 
-# LLM Provider: "gemini" or "vllm"
-LLM_PROVIDER=gemini
+# LLM provider: vllm (gemini is legacy, never required)
+LLM_PROVIDER=vllm
 
-# Gemini Configuration
-GEMINI_API_KEY=your-api-key
-GEMINI_MODEL=gemini-1.5-flash
-
-# vLLM Configuration (if using vLLM)
-VLLM_BASE_URL=http://localhost:8001/v1
-VLLM_MODEL=meta-llama/Llama-3.1-8B-Instruct
-VLLM_API_KEY=token-abc123
+# Models (DMZ gateway in production, see deploy/dmz/README.md)
+VLLM_BASE_URL=https://modeles.ihu.local/patient/v1
+VLLM_MODEL=Qwen/Qwen3-8B
+VLLM_API_KEY=<MODELS_API_KEY>
+VLLM_ARBITER_BASE_URL=https://modeles.ihu.local/arbitre/v1
+VLLM_ARBITER_MODEL=Qwen/Qwen2.5-3B-Instruct
+VLLM_ARBITER_API_KEY=<MODELS_API_KEY>
+KYUTAI_STT_URL=wss://modeles.ihu.local/stt
+KYUTAI_TTS_URL=wss://modeles.ihu.local/tts
+KYUTAI_API_KEY=<MODELS_API_KEY>
+# SSL_CERT_FILE=/etc/ssl/ecos/ca-bundle.pem   # gateway certificate signed by an internal CA
 
 # Case authoring assistant (empty = VLLM_* above)
 AUTHORING_BASE_URL=
@@ -350,6 +364,7 @@ Set `LLM_PROVIDER=vllm` in `fastapi.env` and configure vLLM endpoint. The code a
 - `docs/STATION_TYPES.md` - Station type definitions
 - `docs/PATIENT_AGENT.md` - Patient agent tool calling, guardrails, moderation events
 - `docs/CASE_AUTHORING.md` - Case authoring workshop: structured sheet, compilation, checks, versions, assistant, official corpus (sources and rights), API
+- `docs/DEPLOYMENT.md` - Production deployment: app compose (`docker-compose.prod.yml`, nginx SSE/WebSocket proxying, accounts, seed, packs, corpus), models on the DMZ (`deploy/dmz/`), internal CA, network flows
 - `docs/VOICE.md` - Voice mode: architecture, WebSocket protocol, Kyutai servers (`voice/docker-compose.yml`), voices
 - `docs/ATTACHMENTS.md` - File attachment system
 - `docs/USER_ROUTES.md` - User API documentation

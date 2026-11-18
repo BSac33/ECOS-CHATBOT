@@ -70,7 +70,7 @@
           label="Commencer l'examen" 
           icon="pi pi-play" 
           @click="async() => {
-            await createAttempt(popupContent.case_id)
+            if (popupContent) await createAttempt(popupContent.case_id)
             isVisible = false
             }"/>
       </div>

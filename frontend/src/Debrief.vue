@@ -227,7 +227,7 @@ interface EvaluationData {
 
 interface CaseInfo {
   title: string;
-  edn_codes?: string[];
+  edn_codes?: (string | number)[];
 }
 
 // Réplique du patient coupée par l'étudiant (consultation orale)

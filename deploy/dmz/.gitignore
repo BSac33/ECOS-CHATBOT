@@ -1,0 +1,4 @@
+# Secrets et données du serveur de modèles : jamais dans le dépôt (public)
+.env
+certs/
+data/

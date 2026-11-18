@@ -234,7 +234,7 @@ def classify_student_message_vllm_arbiter(
 
     client = OpenAI(
         base_url=base_url,
-        api_key="dummy-key"
+        api_key=os.getenv("VLLM_ARBITER_API_KEY", os.getenv("VLLM_API_KEY", "dummy-key")),
     )
 
     system_instruction = build_arbiter_system_instruction()
@@ -331,7 +331,7 @@ def get_chat_completion_vllm(
     
     client = OpenAI(
         base_url=base_url,
-        api_key="dummy-key"  # vLLM local ne nécessite pas de vraie clé
+        api_key=os.getenv("VLLM_API_KEY", "dummy-key"),
     )
 
     logger.info(f"🤖 Envoi à vLLM ({base_url}), modèle: {model}")
@@ -385,7 +385,7 @@ def generate_patient_reply_vllm(
     
     client = OpenAI(
         base_url=base_url,
-        api_key="dummy-key"  # vLLM local ne nécessite pas de vraie clé
+        api_key=os.getenv("VLLM_API_KEY", "dummy-key"),
     )
     
     system_instruction = build_patient_system_instruction(patient_prompt)
@@ -469,7 +469,7 @@ def evaluate_attempt_with_vllm(
     
     client = OpenAI(
         base_url=base_url,
-        api_key="dummy-key"
+        api_key=os.getenv("VLLM_API_KEY", "dummy-key"),
     )
     
     from scoring import scales_prompt
@@ -545,6 +545,8 @@ IMPORTANT (clinique réaliste):
                 messages=messages,
                 temperature=0.2,
                 max_tokens=4096,
+                # Qwen3 : pas de mode "thinking" (sortie JSON directe)
+                extra_body={"chat_template_kwargs": {"enable_thinking": False}} if "qwen3" in model.lower() else None,
                 response_format={
                     "type": "json_schema",
                     "json_schema": {
