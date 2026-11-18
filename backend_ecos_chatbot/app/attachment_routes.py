@@ -1,5 +1,11 @@
 """
 Routes pour la gestion des fichiers/attachements
+
+Accès :
+- lecture (infos, liste, téléchargement) : utilisateur connecté (cookie de session),
+  le chat et le débrief chargent les images via <img src="/attachments/download/...">.
+  La liste complète (available_only=false) est réservée à l'auteur du cas ou à un administrateur ;
+- dépôt et suppression : enseignant auteur du cas, ou administrateur.
 """
 from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
 from fastapi.responses import Response, StreamingResponse
@@ -10,11 +16,25 @@ import uuid
 from pathlib import Path
 import mimetypes
 
+from auth import can_edit_case, check_authorization
 from db import get_session
-from models import Attachment, AttachmentUploadOut, AttachmentOut, ClinicalCase
+from models import Attachment, AttachmentUploadOut, AttachmentOut, ClinicalCase, User, UserRole
 from storage import storage
 
 router = APIRouter(prefix="/attachments", tags=["attachments"])
+
+authenticated = check_authorization(UserRole.student)
+teacher = check_authorization(UserRole.teacher)
+
+
+def _own_case(db: Session, case_id: int, user: User) -> ClinicalCase:
+    """Même règle que l'atelier (authoring_routes._own_case) : auteur du cas ou administrateur."""
+    case = db.get(ClinicalCase, case_id)
+    if not case:
+        raise HTTPException(status_code=404, detail="Cas introuvable")
+    if not can_edit_case(case, user):
+        raise HTTPException(status_code=403, detail="Ce cas appartient à un autre enseignant")
+    return case
 
 # Configuration
 MAX_FILE_SIZE = {
@@ -66,7 +86,8 @@ async def upload_attachment(
     description: Optional[str] = Form(None),
     trigger_keywords: Optional[str] = Form(None),
     is_available_during_case: bool = Form(True),
-    db: Session = Depends(get_session)
+    db: Session = Depends(get_session),
+    user: User = Depends(teacher),
 ):
     """
     Upload un fichier et crée un Attachment en base de données.
@@ -79,11 +100,9 @@ async def upload_attachment(
     - **is_available_during_case**: Le fichier est-il disponible pendant l'examen ?
     """
     
-    # Vérifier que le cas existe
-    case = db.get(ClinicalCase, case_id)
-    if not case:
-        raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
-    
+    # Le cas doit exister et appartenir à l'utilisateur (ou admin), avant de lire le fichier
+    _own_case(db, case_id, user)
+
     # Lire le fichier
     content = await file.read()
     file_size = len(content)
@@ -152,7 +171,8 @@ async def upload_attachment(
 @router.get("/{attachment_id}", response_model=AttachmentOut)
 async def get_attachment_info(
     attachment_id: UUID,
-    db: Session = Depends(get_session)
+    db: Session = Depends(get_session),
+    user: User = Depends(authenticated),
 ):
     """Récupère les informations d'un attachment par son ID"""
     attachment = db.get(Attachment, attachment_id)
@@ -175,13 +195,20 @@ async def get_attachment_info(
 async def get_case_attachments(
     case_id: int,
     available_only: bool = True,
-    db: Session = Depends(get_session)
+    db: Session = Depends(get_session),
+    user: User = Depends(authenticated),
 ):
-    """Récupère tous les attachments d'un cas clinique"""
+    """Récupère tous les attachments d'un cas clinique.
+
+    Les fichiers non disponibles pendant l'examen (available_only=false) ne sont
+    listés que pour l'auteur du cas ou un administrateur.
+    """
     query = select(Attachment).where(Attachment.case_id == case_id)
-    
+
     if available_only:
         query = query.where(Attachment.is_available_during_case == True)
+    else:
+        _own_case(db, case_id, user)
     
     attachments = db.exec(query).all()
     
@@ -203,9 +230,10 @@ async def get_case_attachments(
 @router.get("/download/{attachment_id}")
 async def download_attachment(
     attachment_id: UUID,
-    db: Session = Depends(get_session)
+    db: Session = Depends(get_session),
+    user: User = Depends(authenticated),
 ):
-    """Télécharge le fichier d'un attachment"""
+    """Télécharge le fichier d'un attachment (cookie de session envoyé par <img src>)."""
     attachment = db.get(Attachment, attachment_id)
     if not attachment:
         raise HTTPException(status_code=404, detail="Attachment not found")
@@ -229,13 +257,15 @@ async def download_attachment(
 @router.delete("/{attachment_id}")
 async def delete_attachment(
     attachment_id: UUID,
-    db: Session = Depends(get_session)
+    db: Session = Depends(get_session),
+    user: User = Depends(teacher),
 ):
-    """Supprime un attachment et son fichier"""
+    """Supprime un attachment et son fichier (auteur du cas ou administrateur)"""
     attachment = db.get(Attachment, attachment_id)
     if not attachment:
         raise HTTPException(status_code=404, detail="Attachment not found")
-    
+    _own_case(db, attachment.case_id, user)
+
     # Supprimer le fichier du stockage
     try:
         await storage.delete_file(attachment.file_path)

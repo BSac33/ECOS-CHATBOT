@@ -43,7 +43,7 @@ import authoring_assistant
 import case_publishing
 import chat_routes
 import corpus
-from auth import check_authorization
+from auth import can_edit_case, check_authorization
 from case_sheet import CaseSheet, Issue, blocking, check_sheet, compile_case
 from db import get_session
 from models import (
@@ -128,7 +128,7 @@ class TestAttemptOut(BaseModel):
 # ==================== OUTILS ====================
 
 def _can_edit(case: ClinicalCase, user: User) -> bool:
-    return case.created_by == user.id or user.role == UserRole.admin
+    return can_edit_case(case, user)
 
 
 def _can_read(case: ClinicalCase, user: User) -> bool:

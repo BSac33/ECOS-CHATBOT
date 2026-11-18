@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 from sqlmodel import Session
 from urllib3 import HTTPResponse
 from db import get_session
-from models import User, UserRole, UserOut
+from models import ClinicalCase, User, UserRole, UserOut
 from uuid import UUID
 import os
 import logging
@@ -165,6 +165,10 @@ def check_authorization(required_role: UserRole = UserRole.student) -> Callable[
                 )  
         return user   
     return _check   
+
+def can_edit_case(case: ClinicalCase, user: User) -> bool:
+    """Auteur du cas ou administrateur : seuls autorisés à modifier un cas et ses fichiers."""
+    return case.created_by == user.id or user.role == UserRole.admin
 
 async def get_current_user(session: Annotated[Session, Depends(get_session)], token: Annotated[str, Depends(get_token)]):
     try:
