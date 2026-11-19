@@ -1,109 +1,135 @@
 # Serveur de modèles (DMZ)
 
-Les modèles tournent sur une machine GPU de la DMZ ; l'application (site, API, base) tourne
-ailleurs et les appelle à travers une seule passerelle HTTPS.
+Les modèles tournent sur une machine GPU ; l'application (site, API, base) tourne ailleurs
+(serveur web, ou poste local relié par VPN) et les appelle par le réseau.
 
-```
-serveur de l'application  ──HTTPS / WSS──▶  passerelle nginx (:443)  ──réseau Docker interne──▶  vllm-patient  (Qwen3-8B)
-  (APP_SERVER_CIDR)            clé d'API       liste d'IP, TLS                                    vllm-arbitre  (Qwen2.5-3B)
-                                                                                                  stt, tts      (Kyutai, profil « voix »)
-```
+| Service | Modèle | Rôle |
+|---|---|---|
+| `vllm-patient` | Qwen/Qwen3-8B (vLLM, outils Hermes) | patient simulé, évaluation, assistant de rédaction |
+| `vllm-arbitre` | Qwen/Qwen2.5-3B-Instruct (vLLM) | filtre rapide des messages étudiants |
+| `stt`, `tts` | Kyutai moshi-server (profil `voix`) | mode vocal |
+| `gateway` | nginx (profil `passerelle`) | facultatif : HTTPS + clé + liste d'IP |
 
-Seul le port de la passerelle est publié. Les modèles ne sont pas joignables directement.
+Trois façons d'y accéder :
+
+1. **Test par VPN** (mode direct) : ports publiés sur l'adresse interne de la machine, clé
+   vLLM, sans TLS ni nginx. C'est la configuration par défaut de `.env.example`.
+2. **Derrière un nginx déjà en place** : mode direct sur `127.0.0.1`, le nginx existant relaie.
+3. **Passerelle fournie** : nginx en conteneur, HTTPS, seul port publié.
 
 ## Prérequis
 
-- Linux, pilote NVIDIA, Docker avec le plugin Compose (≥ 2.20) et le NVIDIA Container Toolkit
-- Une L40S 48 Go (ou équivalent) suffit pour l'ensemble ; ~60 Go de disque pour `./data`
-- Un certificat pour le nom DNS de la machine (PKI de l'IHU de préférence)
-- Pare-feu : n'ouvrir le port HTTPS qu'au serveur de l'application
+- Linux, pilote NVIDIA, Docker avec le plugin Compose (≥ 2.20), NVIDIA Container Toolkit
+- GPU : ~38 Go pour les deux LLM (L40S 48 Go), ~8 Go de plus pour la voix
+- ~60 Go de disque pour `./data` (ou un cache Hugging Face existant via `HF_CACHE_DIR`)
 
-## Installation
+## 1. Test par VPN (mode direct)
 
 ```bash
-cd deploy/dmz
+git clone https://github.com/BSac33/ECOS-CHATBOT.git && cd ECOS-CHATBOT/deploy/dmz
 cp .env.example .env
-openssl rand -hex 32            # -> MODELS_API_KEY dans .env
-# APP_SERVER_CIDR = adresse du serveur de l'application, ex. 10.20.30.40/32
+nvidia-smi          # machine partagée : choisir un GPU et des fractions qui tiennent dans la mémoire libre
+hostname -I         # adresse interne, celle que vous joignez par le VPN
+```
 
-mkdir -p certs
-cp /chemin/vers/fullchain.pem /chemin/vers/privkey.pem certs/
-# Sans PKI (tests uniquement), certificat autosigné :
-#   openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=modeles.ihu.local" \
-#     -addext "subjectAltName=DNS:modeles.ihu.local" -keyout certs/privkey.pem -out certs/fullchain.pem
+Dans `.env` :
 
+- `MODELS_API_KEY` : `openssl rand -hex 32`
+- `MODELS_BIND` : l'adresse interne (jamais `0.0.0.0` sur une machine de DMZ)
+- `PATIENT_GPU`, `ARBITER_GPU`, `PATIENT_GPU_MEMORY`, `ARBITER_GPU_MEMORY` selon `nvidia-smi`
+- ports (`PATIENT_PORT`…) si 8001/8002 sont déjà pris par d'autres
+- `COMPOSE_PROFILES=voix` pour le mode vocal (sinon, LLM seuls)
+
+```bash
 docker compose up -d --build
-docker compose ps
+docker compose ps                       # attendre « healthy » (premier démarrage : 20 à 60 min)
+docker compose logs -f vllm-patient     # suivre le téléchargement et le chargement
 ```
 
-Le premier démarrage est long : environ 16 Go de poids pour le modèle patient, 6 Go pour
-l'arbitre et ~8 Go pour la voix. moshi-server se compile aussi au premier lancement (~10 min).
-Les services démarrent les uns après les autres (patient, puis arbitre, puis voix), parce que
-chaque serveur vLLM mesure la mémoire GPU libre au lancement.
-
-Vérifications depuis le serveur de l'application :
+Depuis votre poste (VPN connecté) :
 
 ```bash
-curl https://modeles.ihu.local/healthz                                   # ok
-curl -H "Authorization: Bearer $CLE" https://modeles.ihu.local/patient/v1/models
-curl -H "Authorization: Bearer $CLE" https://modeles.ihu.local/arbitre/v1/models
+curl -H "Authorization: Bearer <clé>" http://<adresse>:8001/v1/models
+curl -H "Authorization: Bearer <clé>" http://<adresse>:8002/v1/models
 ```
 
-## Côté application (`backend_ecos_chatbot/fastapi.env`)
+Côté application (`backend_ecos_chatbot/fastapi.env`) :
 
 ```bash
-VLLM_BASE_URL=https://modeles.ihu.local/patient/v1
-VLLM_MODEL=Qwen/Qwen3-8B
-VLLM_API_KEY=<MODELS_API_KEY>
-VLLM_ARBITER_BASE_URL=https://modeles.ihu.local/arbitre/v1
-VLLM_ARBITER_MODEL=Qwen/Qwen2.5-3B-Instruct
-VLLM_ARBITER_API_KEY=<MODELS_API_KEY>
-KYUTAI_STT_URL=wss://modeles.ihu.local/stt
-KYUTAI_TTS_URL=wss://modeles.ihu.local/tts
-KYUTAI_API_KEY=<MODELS_API_KEY>
-# Certificat de la PKI interne : AC à ajouter au magasin du conteneur (voir docs/DEPLOYMENT.md)
-SSL_CERT_FILE=/etc/ssl/ecos/ca-bundle.pem
+VLLM_BASE_URL=http://<adresse>:8001/v1
+VLLM_API_KEY=<clé>
+VLLM_ARBITER_BASE_URL=http://<adresse>:8002/v1
+VLLM_ARBITER_API_KEY=<clé>
+KYUTAI_STT_URL=ws://<adresse>:8090
+KYUTAI_TTS_URL=ws://<adresse>:8089
+KYUTAI_API_KEY=public_token
 ```
 
-L'assistant de rédaction (`AUTHORING_*`) utilise le modèle patient quand ses variables sont vides.
+Limites du mode direct : trafic en clair (il reste dans le VPN), voix protégée par
+l'identifiant par défaut de moshi-server (`public_token`). À réserver aux tests, sans données
+réelles d'étudiants.
 
-## Routes de la passerelle
+## 2. Derrière un nginx déjà en place (production)
+
+Si le nginx est sur la même machine : mode direct avec `MODELS_BIND=127.0.0.1` (rien n'est
+publié sur le réseau), puis reprendre dans sa configuration les blocs `location` de
+`gateway/default.conf.template` et les réglages de `gateway/snippets/` en remplaçant les
+upstreams par `127.0.0.1:<port>` :
+
+- vLLM : `proxy_buffering off` (réponses en flux), `proxy_read_timeout 600s`, en-tête
+  `Authorization` relayé (vLLM vérifie la clé) ;
+- Kyutai : WebSocket (`Upgrade`/`Connection`), `proxy_read_timeout 3600s`, contrôle de
+  `kyutai-api-key` puis remplacement par `public_token` ;
+- filtrage `allow`/`deny` sur l'adresse du serveur de l'application.
+
+Si le nginx est sur une autre machine : `MODELS_BIND` = adresse interne, et un pare-feu qui
+n'autorise que l'adresse de ce nginx.
+
+## 3. Passerelle fournie (nginx en conteneur)
+
+Dans `.env` : commenter `COMPOSE_FILE` et `MODELS_BIND`, `COMPOSE_PROFILES=passerelle` (ou
+`voix,passerelle`), `APP_SERVER_CIDR` = adresse du serveur de l'application. Certificats :
+
+```bash
+mkdir -p certs && cp /chemin/fullchain.pem /chemin/privkey.pem certs/
+# sans PKI (tests) : certificat autosigné pour l'adresse IP
+#   openssl req -x509 -newkey rsa:2048 -nodes -days 365 -subj "/CN=ecos-modeles" \
+#     -addext "subjectAltName=IP:<adresse>" -keyout certs/privkey.pem -out certs/fullchain.pem
+docker compose up -d --build
+```
 
 | Chemin | Service | Authentification |
 |---|---|---|
-| `/patient/v1/...` | vLLM patient (API OpenAI, flux SSE) | `Authorization: Bearer <clé>` |
+| `/patient/v1/...` | vLLM patient (flux SSE) | `Authorization: Bearer <clé>` |
 | `/arbitre/v1/...` | vLLM arbitre | `Authorization: Bearer <clé>` |
 | `/stt/api/asr-streaming` | Kyutai STT (WebSocket) | `kyutai-api-key: <clé>` |
 | `/tts/api/tts_streaming` | Kyutai TTS (WebSocket) | `kyutai-api-key: <clé>` |
 | `/healthz` | passerelle | aucune (liste d'IP seulement) |
 
-La passerelle remplace la clé Kyutai par l'identifiant interne de moshi-server ; la clé des
-LLM est relayée et vérifiée aussi par vLLM. Les réponses en flux ne sont pas mises en tampon,
-les WebSocket restent ouverts jusqu'à 1 h. nginx ne journalise ni les corps ni les en-têtes :
-les transcriptions des étudiants n'apparaissent pas dans les journaux.
+Côté application : `https://<hôte>/patient/v1`, `https://<hôte>/arbitre/v1`,
+`wss://<hôte>/stt`, `wss://<hôte>/tts`, la même clé partout (y compris `KYUTAI_API_KEY`).
+Certificat d'une AC interne ou autosigné : `SSL_CERT_FILE` (docs/DEPLOYMENT.md).
 
-## Variantes
+## Démarrage, mémoire GPU
 
-- **Sans voix** : `COMPOSE_PROFILES=` dans `.env`. La passerelle répond 502 sur `/stt` et `/tts`.
-- **Deux GPU** : `PATIENT_GPU=0`, `ARBITER_GPU=1`, `VOICE_GPU=1`, `PATIENT_GPU_MEMORY=0.85`.
-- **Plusieurs adresses autorisées** : ajouter des lignes `allow` dans
-  `gateway/default.conf.template` (avant `deny all`).
-- **Reverse proxy TLS déjà en place à l'IHU** : le faire pointer sur la passerelle et mettre
-  son adresse dans `APP_SERVER_CIDR`.
+Les services démarrent les uns après les autres (patient, puis arbitre, puis voix) : chaque
+vLLM vérifie au lancement que la fraction demandée de la mémoire **totale** du GPU est libre.
+Sur une machine partagée, si un vLLM refuse de démarrer faute de mémoire, baisser
+`PATIENT_GPU_MEMORY` / `ARBITER_GPU_MEMORY` (et `PATIENT_MAX_MODEL_LEN`) ou changer de GPU.
 
-## Sans accès sortant (DMZ fermée)
+## Sans accès sortant
 
-Après un premier démarrage réussi sur une machine connectée, `./data` contient tout ce
-qu'il faut : poids (`hf-cache`), binaire moshi-server compilé (`kyutai/*-target/install`) et
-paquets Python (`kyutai/uv-cache`). Copier le dossier `deploy/dmz` complet et les images
+Après un premier démarrage réussi sur une machine connectée, `./data` contient tout :
+poids (`hf-cache`), binaire moshi-server compilé (`kyutai/*-target/install`), paquets Python
+(`kyutai/uv-cache`). Copier le dossier `deploy/dmz` et les images
 (`docker save vllm/vllm-openai:<tag> nginx:<tag> ecos-moshi-server:latest | gzip > modeles.tar.gz`,
-puis `docker load` sur la DMZ), mettre `OFFLINE=1` dans `.env`, puis `docker compose up -d`
-(sans `--build`).
+puis `docker load`), mettre `OFFLINE=1` dans `.env`, puis `docker compose up -d` (sans `--build`).
 
-## Mise à jour
+## Mise à jour, arrêt
 
 ```bash
 docker compose pull && docker compose up -d     # nouvelle version de vLLM : VLLM_TAG dans .env
+docker compose down                             # libère le GPU (les poids restent dans ./data)
 ```
 
 Les noms de modèles (`PATIENT_MODEL`, `ARBITER_MODEL`) doivent rester identiques à

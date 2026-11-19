@@ -3,14 +3,15 @@
 #   patient   vLLM  Qwen/Qwen3-8B              agent patient, évaluation, assistant de rédaction
 #   arbitre   vLLM  Qwen/Qwen2.5-3B-Instruct   filtre rapide des messages étudiants
 #   stt, tts  Kyutai moshi-server              mode vocal (facultatif : profil « voix »)
-#   gateway   nginx                            seul port exposé : HTTPS + clé d'API + liste d'IP
+#   gateway   nginx                            facultatif (profil « passerelle ») : HTTPS + clé + liste d'IP
 #
-# Les services de modèles n'ont aucun port publié : seul « gateway » est joignable depuis
-# l'extérieur, et seulement depuis le serveur de l'application (APP_SERVER_CIDR).
+# Deux façons d'y accéder (choix dans .env, voir README.md) :
+#   - mode direct (docker-compose.direct.yml) : ports publiés sur l'adresse interne seulement,
+#     clé vLLM, sans TLS ni nginx ; pour tester par VPN ou derrière un nginx existant
+#   - passerelle : seul « gateway » est publié, en HTTPS, pour le serveur de l'application
 #
 #   cd deploy/dmz
-#   cp .env.example .env            # puis éditer (clé, IP du serveur applicatif, GPU)
-#   mkdir -p certs                  # fullchain.pem + privkey.pem (PKI de l'IHU ou voir README)
+#   cp .env.example .env            # puis éditer (clé, adresse, GPU)
 #   docker compose up -d --build
 #   docker compose ps               # premier démarrage long : téléchargements + compilation
 #
@@ -142,15 +143,18 @@ services:
         condition: service_healthy
     networks: [modeles]
 
-  # ---------- Passerelle : seul point d'entrée ----------
+  # ---------- Passerelle : seul point d'entrée (profil « passerelle ») ----------
+  # Sans elle (mode test, ou nginx déjà en place) : docker-compose.direct.yml, voir README.md
   gateway:
+    profiles: [passerelle]
     image: nginx:${NGINX_TAG:-1.28-alpine}
     restart: unless-stopped
     ports:
       - "${GATEWAY_PORT:-443}:443"
     environment:
       MODELS_API_KEY: ${MODELS_API_KEY:?définir MODELS_API_KEY dans .env}
-      APP_SERVER_CIDR: ${APP_SERVER_CIDR:?définir APP_SERVER_CIDR dans .env}
+      # Défaut sûr : personne (sauf la sonde locale) tant que APP_SERVER_CIDR n'est pas défini
+      APP_SERVER_CIDR: ${APP_SERVER_CIDR:-127.0.0.1/32}
       # Seules ces variables sont remplacées dans le gabarit (les $variables nginx restent)
       NGINX_ENVSUBST_FILTER: "^(MODELS_API_KEY|APP_SERVER_CIDR)$"
     volumes:

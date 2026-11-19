@@ -1,0 +1,26 @@
+# Accès direct aux modèles, SANS passerelle nginx : tests depuis un poste relié par VPN,
+# ou machine où un nginx existe déjà (MODELS_BIND=127.0.0.1, voir README.md).
+#
+# Les ports sont publiés uniquement sur MODELS_BIND, l'adresse interne de la machine (celle
+# que vous joignez par le VPN) : jamais 0.0.0.0 sur une machine de DMZ. Pas de TLS : le trafic
+# reste dans le VPN ; à réserver aux tests (pas de données réelles d'étudiants).
+#
+# Activé par .env : COMPOSE_FILE=docker-compose.yml:docker-compose.direct.yml
+#
+#   vLLM patient   http://MODELS_BIND:PATIENT_PORT/v1   (Authorization: Bearer MODELS_API_KEY)
+#   vLLM arbitre   http://MODELS_BIND:ARBITER_PORT/v1   (idem)
+#   Kyutai STT     ws://MODELS_BIND:STT_PORT            (kyutai-api-key: public_token)
+#   Kyutai TTS     ws://MODELS_BIND:TTS_PORT            (idem)
+services:
+  vllm-patient:
+    ports:
+      - "${MODELS_BIND:?définir MODELS_BIND (adresse interne de la machine) dans .env}:${PATIENT_PORT:-8001}:8000"
+  vllm-arbitre:
+    ports:
+      - "${MODELS_BIND:?définir MODELS_BIND dans .env}:${ARBITER_PORT:-8002}:8000"
+  stt:
+    ports:
+      - "${MODELS_BIND:?définir MODELS_BIND dans .env}:${STT_PORT:-8090}:8080"
+  tts:
+    ports:
+      - "${MODELS_BIND:?définir MODELS_BIND dans .env}:${TTS_PORT:-8089}:8080"

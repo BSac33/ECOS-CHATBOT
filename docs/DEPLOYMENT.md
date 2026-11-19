@@ -63,21 +63,41 @@ ni dans git : le dépôt est public.
 
 ## 2. Modèles sur la DMZ
 
-Voir `deploy/dmz/README.md` : installation, certificats, GPU, mode sans accès sortant.
+Voir `deploy/dmz/README.md` : modes d'accès, GPU partagé, certificats, mode sans accès sortant.
 
 ```bash
 cd deploy/dmz
-cp .env.example .env        # MODELS_API_KEY, APP_SERVER_CIDR, GPU
-mkdir -p certs              # fullchain.pem + privkey.pem
+cp .env.example .env        # MODELS_API_KEY, MODELS_BIND (adresse interne), GPU
 docker compose up -d --build
 ```
+
+Deux modes d'accès, choisis dans `.env` :
+
+- **direct** (défaut de `.env.example`) : pas de nginx, les ports des modèles sont publiés
+  sur l'adresse interne de la machine seulement (`MODELS_BIND`), clé vLLM, sans TLS. Pour
+  tester depuis un poste relié par VPN, ou derrière un nginx déjà en place (`127.0.0.1`).
+- **passerelle** (profil `passerelle`) : nginx en conteneur, HTTPS, clé unique, liste d'IP.
 
 Budget mémoire sur une L40S 48 Go : patient 0,55 (~26 Go) + arbitre 0,25 (~12 Go) +
 STT ~2,5 Go + TTS ~5,3 Go. Le mode vocal est un profil Compose (`COMPOSE_PROFILES=voix`).
 
 ## 3. Relier l'application aux modèles
 
-Dans `backend_ecos_chatbot/fastapi.env` (une seule clé, `MODELS_API_KEY` de la DMZ) :
+Dans `backend_ecos_chatbot/fastapi.env` (clé = `MODELS_API_KEY` de la DMZ).
+
+Mode direct (tests par VPN) :
+
+```bash
+VLLM_BASE_URL=http://<adresse-interne>:8001/v1
+VLLM_API_KEY=<clé>
+VLLM_ARBITER_BASE_URL=http://<adresse-interne>:8002/v1
+VLLM_ARBITER_API_KEY=<clé>
+KYUTAI_STT_URL=ws://<adresse-interne>:8090
+KYUTAI_TTS_URL=ws://<adresse-interne>:8089
+KYUTAI_API_KEY=public_token
+```
+
+Passerelle ou nginx existant (HTTPS) :
 
 ```bash
 VLLM_BASE_URL=https://modeles.ihu.local/patient/v1
@@ -91,6 +111,14 @@ KYUTAI_API_KEY=<clé>
 
 Puis `docker compose -f docker-compose.prod.yml up -d` (le conteneur `api` relit `fastapi.env`
 quand il est recréé).
+
+### Application sur un poste local (tests)
+
+`fastapi.env` : `CORS_ORIGINS=http://localhost:8080`, `SECURE_COOKIES=False`. Lancer avec
+`WEB_PORT=127.0.0.1:8080` pour que le site ne soit joignable que depuis le poste. Le micro
+du navigateur fonctionne sur `http://localhost` (contexte sécurisé). Si la machine de modèles
+a une adresse en 172.16-31.x.x et reste injoignable depuis le conteneur `api` alors qu'elle
+répond depuis le poste, changer les plages d'adresses de Docker (`default-address-pools`).
 
 ### Certificat de la PKI interne
 
@@ -123,5 +151,5 @@ Puis, sur le site, lancer une station d'interrogatoire en compte étudiant.
 | De | Vers | Port | Usage |
 |---|---|---|---|
 | navigateurs | serveur de l'application | 443 (reverse proxy) | site, SSE, WebSocket vocal |
-| serveur de l'application | passerelle DMZ | 443 (`GATEWAY_PORT`) | LLM (HTTPS), voix (WSS) |
+| serveur de l'application | machine de modèles | 443 (passerelle) ou 8001, 8002, 8089, 8090 (mode direct) | LLM, voix |
 | machine DMZ | huggingface.co, ghcr.io, docker.io, crates.io, pypi.org | 443 | premier démarrage seulement (sinon mode hors ligne) |

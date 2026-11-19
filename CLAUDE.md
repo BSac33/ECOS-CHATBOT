@@ -37,8 +37,10 @@ make stations
 docker compose -f docker-compose.prod.yml up -d --build
 docker compose -f docker-compose.prod.yml exec api python scripts/create_user.py admin --role admin
 
-# Models on the GPU machine (DMZ): vLLM patient + arbiter, Kyutai STT/TTS (profile "voix"),
-# nginx gateway (TLS, single API key, IP allowlist); the app reaches them over HTTPS/WSS
+# Models on the GPU machine (DMZ): vLLM patient + arbiter, Kyutai STT/TTS (profile "voix").
+# Access mode set in deploy/dmz/.env: direct (default, docker-compose.direct.yml: ports bound to
+# MODELS_BIND only, vLLM key, no TLS; tests over VPN or behind an existing nginx) or the nginx
+# gateway (profile "passerelle": TLS, single API key, IP allowlist)
 cd deploy/dmz && cp .env.example .env && docker compose up -d --build
 ```
 
