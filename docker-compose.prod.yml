@@ -36,6 +36,9 @@ services:
 
   api:
     image: ecos-api:latest
+    # Même image que « migrate » : sans « build » ici, Compose chercherait à la télécharger
+    # (« pull access denied for ecos-api ») au lieu de la construire
+    build: ./backend_ecos_chatbot/app
     env_file: ./backend_ecos_chatbot/fastapi.env
     command: >-
       uvicorn main:app --host 0.0.0.0 --port 8000
