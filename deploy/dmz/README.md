@@ -20,6 +20,8 @@ Trois façons d'y accéder :
 ## Prérequis
 
 - Linux, pilote NVIDIA, Docker avec le plugin Compose (≥ 2.20), NVIDIA Container Toolkit
+- Version de vLLM selon le pilote (`nvidia-smi`, « CUDA Version ») : 12.8 ou plus → `VLLM_TAG=v0.11.0`
+  (défaut) ; 12.4 → `VLLM_TAG=v0.8.5.post1` (Qwen3 et outils pris en charge)
 - GPU : ~38 Go pour les deux LLM (L40S 48 Go), ~8 Go de plus pour la voix
 - ~60 Go de disque pour `./data` (ou un cache Hugging Face existant via `HF_CACHE_DIR`)
 
