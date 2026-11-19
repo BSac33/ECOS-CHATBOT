@@ -1,0 +1,17 @@
+# Accès au GPU par CDI au lieu du runtime nvidia : pour un Docker personnel « rootless »
+# (docker-perso.sh), où le runtime nvidia classique demande des droits administrateur.
+# Activé par modeles.sh quand le Docker personnel est actif ; spécification CDI générée par
+# docker-perso.sh (nvidia-ctk cdi generate, dans ~/.config/cdi).
+services:
+  vllm-patient:
+    deploy: !reset {}
+    devices: ["nvidia.com/gpu=${PATIENT_GPU:-0}"]
+  vllm-arbitre:
+    deploy: !reset {}
+    devices: ["nvidia.com/gpu=${ARBITER_GPU:-0}"]
+  stt:
+    deploy: !reset {}
+    devices: ["nvidia.com/gpu=${VOICE_GPU:-0}"]
+  tts:
+    deploy: !reset {}
+    devices: ["nvidia.com/gpu=${VOICE_GPU:-0}"]

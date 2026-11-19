@@ -71,7 +71,28 @@ Limites du mode direct : trafic en clair (il reste dans le VPN), voix protégée
 l'identifiant par défaut de moshi-server (`public_token`). À réserver aux tests, sans données
 réelles d'étudiants.
 
-## 1 bis. Partition de Docker trop petite : LLM hors Docker
+## 1 bis. Partition de Docker trop petite
+
+Docker range ses images sur sa propre partition (`docker info --format '{{.DockerRootDir}}'`),
+souvent la partition système ; la déplacer demande des droits administrateur. Deux solutions
+sans eux.
+
+**Votre propre Docker (recommandé si votre compte a des plages `/etc/subuid`)** : un Docker
+« rootless » qui range ses images à côté du projet (`DOCKER_PERSO_DATA` pour un autre dossier),
+GPU par CDI (`docker-compose.cdi.yml`, ajouté automatiquement par `modeles.sh`).
+
+```bash
+grep "^$(whoami):" /etc/subuid /etc/subgid   # doit afficher deux lignes
+./docker-perso.sh installer                  # une fois ; se termine par un test du GPU
+./modeles.sh demarrer 1                      # tout dans votre Docker : LLM + voix
+```
+
+Vos commandes `docker` utilisent alors votre Docker (contexte `rootless`) ; celui de la machine
+reste accessible avec `docker --context default …`, et `./docker-perso.sh desinstaller` revient
+en arrière. Si « linger » ne peut pas être activé, votre Docker s'arrête quand toutes vos
+sessions sont fermées (demander `loginctl enable-linger <compte>` à l'administrateur).
+
+**Sinon : LLM hors Docker**, voix dans Docker (voir ci-dessous).
 
 **En une commande** (sans droits administrateur) :
 

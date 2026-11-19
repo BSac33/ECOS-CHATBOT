@@ -43,7 +43,9 @@ docker compose -f docker-compose.prod.yml exec api python scripts/create_user.py
 # gateway (profile "passerelle": TLS, single API key, IP allowlist). Profiles: llm (vLLM, default),
 # voix, passerelle. No room on Docker's partition / no admin: LLMs outside Docker with
 # deploy/dmz/vllm-local.sh (same .env; vLLM version picked from the NVIDIA driver's CUDA version),
-# voice image built for the driver's CUDA (KYUTAI_CUDA_VERSION); all-in-one: ./modeles.sh demarrer <gpu>
+# voice image built for the driver's CUDA (KYUTAI_CUDA_VERSION); all-in-one: ./modeles.sh demarrer <gpu>.
+# Or a personal rootless Docker with images on a big partition, GPU via CDI (docker-compose.cdi.yml):
+# ./docker-perso.sh installer, then modeles.sh runs everything in Docker
 cd deploy/dmz && cp .env.example .env && docker compose up -d --build
 ```
 
