@@ -73,6 +73,19 @@ réelles d'étudiants.
 
 ## 1 bis. Partition de Docker trop petite : LLM hors Docker
 
+**En une commande** (sans droits administrateur) :
+
+```bash
+./modeles.sh demarrer 1     # 1 = numéro de la carte (nvidia-smi), retenu pour les fois suivantes
+./modeles.sh etat
+./modeles.sh arreter
+```
+
+`demarrer` règle `.env` (clé, adresse de la session SSH, carte, CUDA de l'image vocale d'après
+le pilote), installe vLLM hors Docker si besoin, lance patient puis arbitre, puis la voix dans
+Docker si la partition de Docker a la place (sinon il explique quoi libérer), et affiche les
+lignes à copier dans `fastapi.env` de l'application. Détail des deux briques ci-dessous.
+
 Docker range ses images sur sa propre partition (`docker info --format '{{.DockerRootDir}}'`),
 souvent la partition système, et ce réglage demande des droits administrateur. Si elle manque
 de place, les LLM peuvent tourner sans Docker, installés dans le projet (donc sur la partition
