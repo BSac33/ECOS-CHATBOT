@@ -40,7 +40,10 @@ docker compose -f docker-compose.prod.yml exec api python scripts/create_user.py
 # Models on the GPU machine (DMZ): vLLM patient + arbiter, Kyutai STT/TTS (profile "voix").
 # Access mode set in deploy/dmz/.env: direct (default, docker-compose.direct.yml: ports bound to
 # MODELS_BIND only, vLLM key, no TLS; tests over VPN or behind an existing nginx) or the nginx
-# gateway (profile "passerelle": TLS, single API key, IP allowlist)
+# gateway (profile "passerelle": TLS, single API key, IP allowlist). Profiles: llm (vLLM, default),
+# voix, passerelle. No room on Docker's partition / no admin: LLMs outside Docker with
+# deploy/dmz/vllm-local.sh (same .env; vLLM version picked from the NVIDIA driver's CUDA version),
+# voice image built for the driver's CUDA (KYUTAI_CUDA_VERSION)
 cd deploy/dmz && cp .env.example .env && docker compose up -d --build
 ```
 

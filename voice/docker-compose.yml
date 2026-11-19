@@ -9,6 +9,8 @@ services:
     image: ecos-moshi-server:latest
     build:
       context: moshi-server
+      args:
+        CUDA_VERSION: ${KYUTAI_CUDA_VERSION:-12.8.1}   # 12.4.1 si le pilote est en CUDA 12.4
     command: ["worker", "--config", "configs/stt.toml"]
     container_name: kyutai-stt
     ports:
@@ -35,6 +37,8 @@ services:
     image: ecos-moshi-server:latest
     build:
       context: moshi-server
+      args:
+        CUDA_VERSION: ${KYUTAI_CUDA_VERSION:-12.8.1}   # 12.4.1 si le pilote est en CUDA 12.4
     command: ["worker", "--config", "configs/tts.toml"]
     container_name: kyutai-tts
     ports:

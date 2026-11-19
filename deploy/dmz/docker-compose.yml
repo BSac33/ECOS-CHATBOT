@@ -3,6 +3,7 @@
 #   patient   vLLM  Qwen/Qwen3-8B              agent patient, évaluation, assistant de rédaction
 #   arbitre   vLLM  Qwen/Qwen2.5-3B-Instruct   filtre rapide des messages étudiants
 #   stt, tts  Kyutai moshi-server              mode vocal (facultatif : profil « voix »)
+#   (patient et arbitre : profil « llm » ; ou hors Docker avec ./vllm-local.sh)
 #   gateway   nginx                            facultatif (profil « passerelle ») : HTTPS + clé + liste d'IP
 #
 # Deux façons d'y accéder (choix dans .env, voir README.md) :
@@ -19,7 +20,9 @@
 name: ecos-modeles
 
 services:
+  # ---------- LLM (profil « llm ») ; sans Docker : ./vllm-local.sh ----------
   vllm-patient:
+    profiles: [llm]
     image: vllm/vllm-openai:${VLLM_TAG:-v0.11.0}
     restart: unless-stopped
     ipc: host
@@ -56,6 +59,7 @@ services:
     networks: [modeles]
 
   vllm-arbitre:
+    profiles: [llm]
     image: vllm/vllm-openai:${VLLM_TAG:-v0.11.0}
     restart: unless-stopped
     ipc: host
@@ -94,7 +98,10 @@ services:
   stt:
     profiles: [voix]
     image: ecos-moshi-server:latest
-    build: ../../voice/moshi-server
+    build:
+      context: ../../voice/moshi-server
+      args:
+        CUDA_VERSION: ${KYUTAI_CUDA_VERSION:-12.8.1}
     command: ["worker", "--config", "configs/stt.toml"]
     restart: unless-stopped
     environment: &kyutai-env
@@ -117,12 +124,16 @@ services:
     depends_on:
       vllm-arbitre:
         condition: service_healthy
+        required: false   # LLM hors Docker (vllm-local.sh) : la voix démarre seule
     networks: [modeles]
 
   tts:
     profiles: [voix]
     image: ecos-moshi-server:latest
-    build: ../../voice/moshi-server
+    build:
+      context: ../../voice/moshi-server
+      args:
+        CUDA_VERSION: ${KYUTAI_CUDA_VERSION:-12.8.1}
     command: ["worker", "--config", "configs/tts.toml"]
     restart: unless-stopped
     environment: *kyutai-env
@@ -141,6 +152,7 @@ services:
     depends_on:
       vllm-arbitre:
         condition: service_healthy
+        required: false   # LLM hors Docker (vllm-local.sh) : la voix démarre seule
     networks: [modeles]
 
   # ---------- Passerelle : seul point d'entrée (profil « passerelle ») ----------

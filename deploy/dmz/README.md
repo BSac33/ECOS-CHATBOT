@@ -40,7 +40,7 @@ Dans `.env` :
 - `MODELS_BIND` : l'adresse interne (jamais `0.0.0.0` sur une machine de DMZ)
 - `PATIENT_GPU`, `ARBITER_GPU`, `PATIENT_GPU_MEMORY`, `ARBITER_GPU_MEMORY` selon `nvidia-smi`
 - ports (`PATIENT_PORT`…) si 8001/8002 sont déjà pris par d'autres
-- `COMPOSE_PROFILES=voix` pour le mode vocal (sinon, LLM seuls)
+- `COMPOSE_PROFILES=llm,voix` pour le mode vocal (par défaut `llm` : LLM seuls)
 
 ```bash
 docker compose up -d --build
@@ -70,6 +70,37 @@ KYUTAI_API_KEY=public_token
 Limites du mode direct : trafic en clair (il reste dans le VPN), voix protégée par
 l'identifiant par défaut de moshi-server (`public_token`). À réserver aux tests, sans données
 réelles d'étudiants.
+
+## 1 bis. Partition de Docker trop petite : LLM hors Docker
+
+Docker range ses images sur sa propre partition (`docker info --format '{{.DockerRootDir}}'`),
+souvent la partition système, et ce réglage demande des droits administrateur. Si elle manque
+de place, les LLM peuvent tourner sans Docker, installés dans le projet (donc sur la partition
+du projet), avec `vllm-local.sh` ; Docker ne sert plus qu'à la voix (image ~10 Go).
+
+```bash
+./vllm-local.sh install     # une fois : uv, Python, vLLM dans data/vllm-local (~10 Go)
+./vllm-local.sh start       # patient puis arbitre, en arrière-plan (survit à la déconnexion)
+./vllm-local.sh status      # « prêt » quand les modèles répondent
+./vllm-local.sh logs        # journal du patient (logs arbitre, logs demarrage)
+./vllm-local.sh stop        # arrête tout et libère le GPU
+```
+
+Le script lit le même `.env` (clé, `MODELS_BIND`, ports, GPU, fractions de mémoire) ; les
+adresses vues par l'application sont identiques à celles de la version Docker. La version de
+vLLM suit le pilote (`nvidia-smi`, « CUDA Version ») : 12.8 ou plus → 0.11.0, sinon
+0.8.5.post1 (forçable avec `VLLM_PIP_VERSION`). La clé passe par l'environnement, jamais en
+argument (visible par tous avec `ps` sur une machine partagée).
+
+Voix dans Docker en même temps : retirer `llm` des profils, et compiler l'image vocale pour la
+version CUDA du pilote :
+
+```bash
+# .env : COMPOSE_PROFILES=voix   KYUTAI_CUDA_VERSION=12.4.1 (pilote en CUDA 12.4)
+./vllm-local.sh start                          # d'abord les LLM (mémoire GPU)
+docker compose up -d --build                   # puis la voix ; 1er démarrage : compilation ~10 min
+docker compose logs -f stt                     # « healthy » quand moshi-server répond
+```
 
 ## 2. Derrière un nginx déjà en place (production)
 
@@ -131,6 +162,7 @@ puis `docker load`), mettre `OFFLINE=1` dans `.env`, puis `docker compose up -d`
 
 ```bash
 docker compose pull && docker compose up -d     # nouvelle version de vLLM : VLLM_TAG dans .env
+                                                # (télécharge ~20 Go sur la partition de Docker)
 docker compose down                             # libère le GPU (les poids restent dans ./data)
 ```
 

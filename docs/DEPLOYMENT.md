@@ -78,6 +78,12 @@ Deux modes d'accès, choisis dans `.env` :
   tester depuis un poste relié par VPN, ou derrière un nginx déjà en place (`127.0.0.1`).
 - **passerelle** (profil `passerelle`) : nginx en conteneur, HTTPS, clé unique, liste d'IP.
 
+Profils Compose : `llm` (vLLM dans Docker, défaut), `voix` (Kyutai), `passerelle` (nginx).
+Si la partition de Docker manque de place et sans droits administrateur, les LLM tournent hors
+Docker avec `deploy/dmz/vllm-local.sh` (même `.env`, mêmes adresses) et Docker ne sert qu'à la
+voix (`COMPOSE_PROFILES=voix`). Version de vLLM et image vocale selon le pilote NVIDIA :
+CUDA 12.4 → vLLM 0.8.5.post1 et `KYUTAI_CUDA_VERSION=12.4.1`.
+
 Budget mémoire sur une L40S 48 Go : patient 0,55 (~26 Go) + arbitre 0,25 (~12 Go) +
 STT ~2,5 Go + TTS ~5,3 Go. Le mode vocal est un profil Compose (`COMPOSE_PROFILES=voix`).
 

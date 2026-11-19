@@ -1,6 +1,9 @@
 # Serveur Kyutai (moshi-server) pour la reconnaissance et la synthèse vocales.
 # Adapté de kyutai-labs/unmute (services/moshi-server/public.Dockerfile, licence MIT).
-FROM nvidia/cuda:12.8.1-devel-ubuntu22.04 AS base
+# Version de CUDA : au plus celle du pilote de la machine (nvidia-smi, « CUDA Version »),
+# sinon les noyaux compilés ne se chargent pas. Pilote en CUDA 12.4 : --build-arg CUDA_VERSION=12.4.1
+ARG CUDA_VERSION=12.8.1
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu22.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive
 
