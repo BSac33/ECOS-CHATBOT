@@ -4,7 +4,7 @@
 static_dir = "./static/"
 log_dir = "/tmp/moshi_logs"
 instance_name = "stt"
-# Clé partagée avec le backend (KYUTAI_API_KEY). À changer si le port est exposé.
+# Remplacé au démarrage par KYUTAI_ID (start_moshi_server.sh) : clé = KYUTAI_API_KEY du backend.
 authorized_ids = ["public_token"]
 
 [modules.asr]

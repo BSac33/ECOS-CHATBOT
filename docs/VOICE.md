@@ -38,7 +38,7 @@ haut-parleur ◄─ trames ──────┘        WordChunker ──mot à
 | `backend_ecos_chatbot/app/voice_routes.py` | WebSocket `/chat/attempts/{id}/voice`, orchestration d'une conversation |
 | `frontend/src/services/voice.ts` | Micro (AudioWorklet), lecture de la voix, coupure de parole |
 | `frontend/src/ChatView.vue` | Bouton micro, sous-titres, affichage commun écrit/vocal |
-| `voice/docker-compose.yml` | Serveurs Kyutai (moshi-server) |
+| `voice/moshi-server/`, `deploy/dmz/docker-compose.yml` (profil `voix`) | Serveurs Kyutai (moshi-server) |
 
 ## Consultation orale (mains libres)
 
@@ -172,7 +172,7 @@ Puis dans `backend_ecos_chatbot/fastapi.env` :
 ```bash
 KYUTAI_STT_URL=ws://<serveur-gpu>:8090
 KYUTAI_TTS_URL=ws://<serveur-gpu>:8089
-KYUTAI_API_KEY=public_token          # = authorized_ids des configs voice/moshi-server/configs/*.toml
+KYUTAI_API_KEY=<MODELS_API_KEY>      # = KYUTAI_ID des serveurs (deploy/dmz : MODELS_API_KEY)
 KYUTAI_TTS_DEFAULT_VOICE=unmute-prod-website/developpeuse-3.wav
 ```
 

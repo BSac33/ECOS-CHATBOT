@@ -153,7 +153,7 @@ VLLM_API_KEY=$MODELS_API_KEY
 VLLM_ARBITER_API_KEY=$MODELS_API_KEY
 KYUTAI_STT_URL=ws://$MODELS_BIND:${STT_PORT:-8090}
 KYUTAI_TTS_URL=ws://$MODELS_BIND:${TTS_PORT:-8089}
-KYUTAI_API_KEY=public_token
+KYUTAI_API_KEY=$MODELS_API_KEY
 ===================================================================================================
 Puis, sur votre poste : docker compose -f docker-compose.prod.yml up -d --force-recreate api
 EOF

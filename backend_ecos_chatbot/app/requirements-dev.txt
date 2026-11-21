@@ -1,4 +1,5 @@
-# Dépendances de test (en plus de requirements.txt)
+# Dépendances de test et d'analyse (en plus de requirements.txt)
 -r requirements.txt
-pytest
-pytest-asyncio
+pytest==9.2.0
+pytest-asyncio==1.5.0
+ruff==0.17.6

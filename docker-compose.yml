@@ -2,23 +2,28 @@ services:
   migrate:
     build: ./backend_ecos_chatbot/app
     working_dir: /app
+    entrypoint: []
     env_file: ./backend_ecos_chatbot/fastapi.env
     depends_on:
-      - database
+      database:
+        condition: service_healthy
     command: alembic upgrade head
     volumes:
       - ./backend_ecos_chatbot/app:/app
-    networks: 
+    networks:
       - ecos_network
 
-  fastapi: 
+  fastapi:
     container_name: fastapi
     build:
       context: ./backend_ecos_chatbot/app
       dockerfile: Dockerfile
     working_dir: /app
+    # Développement : code monté, rechargement automatique, root (fichiers de l'hôte)
+    entrypoint: []
+    command: ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
     env_file: "./backend_ecos_chatbot/fastapi.env"
-    volumes: 
+    volumes:
       - ./backend_ecos_chatbot/app:/app
     ports:
       - "8000:8000"

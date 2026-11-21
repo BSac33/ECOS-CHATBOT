@@ -380,7 +380,7 @@ Set `LLM_PROVIDER=vllm` in `fastapi.env` and configure vLLM endpoint. The code a
 - `docs/CASE_AUTHORING.md` - Case authoring workshop: structured sheet, compilation, checks, versions, assistant, official corpus (sources and rights), API
 - `docs/DEPLOYMENT.md` - Production deployment: app compose (`docker-compose.prod.yml`, nginx SSE/WebSocket proxying, accounts, seed, packs, corpus), models on the DMZ (`deploy/dmz/`), internal CA, network flows
 - `docs/BANC_ESSAI.md` - Simulated patient benchmark: fixed scenarios (good / clumsy / cheating student), automatic checks, LLM judge, metrics, blind rating by teachers, Colab notebook
-- `docs/VOICE.md` - Voice mode: architecture, WebSocket protocol, Kyutai servers (`voice/docker-compose.yml`), voices
+- `docs/VOICE.md` - Voice mode: architecture, WebSocket protocol, Kyutai servers (`voice/moshi-server/`, run by `deploy/dmz/docker-compose.yml`, profile `voix`), voices
 - `docs/ATTACHMENTS.md` - File attachment system
 - `docs/USER_ROUTES.md` - User API documentation
 - `docs/POSTGRESQL_SETUP.md` - Database setup guide

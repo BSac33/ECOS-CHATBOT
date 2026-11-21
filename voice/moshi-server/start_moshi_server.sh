@@ -1,6 +1,6 @@
 #!/bin/bash
 # Adapté de kyutai-labs/unmute (services/moshi-server/start_moshi_server_public.sh, licence MIT).
-set -ex
+set -e
 
 export LD_LIBRARY_PATH=$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR"))')
 
@@ -8,6 +8,17 @@ export LD_LIBRARY_PATH=$(python3 -c 'import sysconfig; print(sysconfig.get_confi
 if [ -n "$HUGGING_FACE_HUB_TOKEN" ] && [ "${HF_HUB_OFFLINE:-0}" != "1" ]; then
     uvx hf auth login --token "$HUGGING_FACE_HUB_TOKEN"
 fi
+
+# Clé d'accès (KYUTAI_ID, = MODELS_API_KEY de deploy/dmz/.env) : remplace l'identifiant
+# d'exemple « public_token » des configs. Le backend l'envoie dans l'en-tête kyutai-api-key
+# (KYUTAI_API_KEY de fastapi.env).
+if [ -n "${KYUTAI_ID:-}" ]; then
+    case "$KYUTAI_ID" in
+        *[!A-Za-z0-9._-]*) echo "KYUTAI_ID : lettres, chiffres, . _ - seulement" >&2; exit 1 ;;
+    esac
+    sed -i "s/^authorized_ids = .*/authorized_ids = [\"$KYUTAI_ID\"]/" configs/*.toml
+fi
+set -x
 
 # Compilation au premier démarrage seulement : le binaire est rangé dans /app/target (volume),
 # les démarrages suivants n'ont besoin ni de crates.io ni du compilateur.

@@ -1,0 +1,24 @@
+# Mises à jour proposées chaque semaine ; la CI doit passer avant fusion.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: /backend_ecos_chatbot/app
+    schedule: {interval: weekly}
+    groups:
+      python-mineures:
+        update-types: [minor, patch]
+  - package-ecosystem: npm
+    directory: /frontend
+    schedule: {interval: weekly}
+    groups:
+      npm-mineures:
+        update-types: [minor, patch]
+  - package-ecosystem: docker
+    directory: /backend_ecos_chatbot/app
+    schedule: {interval: monthly}
+  - package-ecosystem: docker
+    directory: /frontend
+    schedule: {interval: monthly}
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: monthly}

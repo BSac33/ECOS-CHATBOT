@@ -3,6 +3,7 @@
 static_dir = "./static/"
 log_dir = "/tmp/moshi_logs"
 instance_name = "tts"
+# Remplacé au démarrage par KYUTAI_ID (start_moshi_server.sh) : clé = KYUTAI_API_KEY du backend.
 authorized_ids = ["public_token"]
 
 [modules.tts_py]

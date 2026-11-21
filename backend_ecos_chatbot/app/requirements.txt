@@ -1,40 +1,23 @@
-# ECOS Chatbot - Backend Dependencies
-
-# Framework web
-fastapi==0.109.0
-uvicorn[standard]==0.27.0
-python-dotenv==1.0.0
-
-# Base de données
-sqlalchemy
-sqlmodel 
-psycopg2-binary==2.9.9
-alembic==1.17.2
-mako==1.3.10
-
-# HTTP client
-httpx==0.26.0
-
-# Validation
-pydantic==2.5.3
-
-# Utilitaires IA
-google-genai
-openai>=1.0.0
-
-# Voix (reconnaissance et synthèse vocales Kyutai, protocole WebSocket + msgpack)
-websockets>=14.0
-msgpack>=1.0
-
-# Corpus officiel (import des chapitres HTML)
-beautifulsoup4>=4.12
-
-# file handling
-python-multipart
-boto3 
-
-# authentication / authorization
-python-jose
-pyjwt
-pwdlib[argon2]
-
+# Dépendances de l'API, versions figées (mises à jour proposées par Dependabot,
+# .github/dependabot.yml ; vérifier avec la CI avant de fusionner).
+fastapi==0.165.0
+starlette==1.10.0
+uvicorn[standard]==0.54.0
+pydantic==2.14.4
+# Les versions récentes de sqlmodel exigent des dates avec fuseau horaire : adapter les modèles avant de monter
+sqlmodel==0.0.30
+SQLAlchemy==2.0.58
+alembic==1.20.1
+psycopg2-binary==2.9.13
+python-multipart==0.0.34
+PyJWT==2.15.1
+pwdlib[argon2]==0.4.2
+python-dotenv==1.2.4
+# Modèles : vLLM (API compatible OpenAI) et Kyutai (WebSocket + msgpack)
+openai==3.57.0
+httpx==0.28.1
+websockets==17.4
+msgpack==1.2.4
+# Import du référentiel de cardiologie (HTML)
+beautifulsoup4==4.15.0
+# Stockage S3 ou MinIO (facultatif, STORAGE_TYPE=s3) : ajouter boto3

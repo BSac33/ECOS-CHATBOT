@@ -100,7 +100,7 @@ VLLM_ARBITER_BASE_URL=http://<adresse-interne>:8002/v1
 VLLM_ARBITER_API_KEY=<clé>
 KYUTAI_STT_URL=ws://<adresse-interne>:8090
 KYUTAI_TTS_URL=ws://<adresse-interne>:8089
-KYUTAI_API_KEY=public_token
+KYUTAI_API_KEY=<MODELS_API_KEY>
 ```
 
 Passerelle ou nginx existant (HTTPS) :

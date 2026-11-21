@@ -9,7 +9,7 @@
 #
 #   vLLM patient   http://MODELS_BIND:PATIENT_PORT/v1   (Authorization: Bearer MODELS_API_KEY)
 #   vLLM arbitre   http://MODELS_BIND:ARBITER_PORT/v1   (idem)
-#   Kyutai STT     ws://MODELS_BIND:STT_PORT            (kyutai-api-key: public_token)
+#   Kyutai STT     ws://MODELS_BIND:STT_PORT            (kyutai-api-key: MODELS_API_KEY)
 #   Kyutai TTS     ws://MODELS_BIND:TTS_PORT            (idem)
 services:
   vllm-patient:

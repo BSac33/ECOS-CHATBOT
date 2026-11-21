@@ -3,11 +3,13 @@
 #   cp backend_ecos_chatbot/fastapi.env.production.example backend_ecos_chatbot/fastapi.env   # puis éditer
 #   cp backend_ecos_chatbot/postgres.env.example backend_ecos_chatbot/postgres.env             # puis éditer
 #   docker compose -f docker-compose.prod.yml up -d --build
-#   docker compose -f docker-compose.prod.yml exec api python scripts/create_user.py admin --role admin
-#   docker compose -f docker-compose.prod.yml exec api python seed_database.py   # cas d'exemple + packs privés
+#   docker compose -f docker-compose.prod.yml exec -u ecos api python scripts/create_user.py admin --role admin
+#   docker compose -f docker-compose.prod.yml exec -u ecos api python seed_database.py   # cas d'exemple + packs privés
 #
-# Site : http://<hôte>:${WEB_PORT:-8080} (mettre un reverse proxy HTTPS devant en production,
-# avec SECURE_COOKIES=True dans fastapi.env).
+# Site : http://127.0.0.1:${WEB_PORT:-8080}, publié sur la seule machine locale par défaut :
+# mettre un reverse proxy HTTPS devant (SECURE_COOKIES=True dans fastapi.env), ou
+# WEB_BIND=0.0.0.0 pour l'ouvrir au réseau (tests). Supervision : GET /health.
+# Sauvegardes : deploy/sauvegarde.sh ; purge des anciennes tentatives : scripts/purge_donnees.py.
 name: ecos
 
 services:
@@ -56,7 +58,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/docs', timeout=5)"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"]
       interval: 15s
       timeout: 6s
       retries: 5
@@ -67,7 +69,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile.prod
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-8080}:80"
     depends_on:
       api:
         condition: service_healthy

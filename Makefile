@@ -1,95 +1,72 @@
-.PHONY: help setup reset seed corpus stations db-shell logs stop clean test
+# Environnement de DÉVELOPPEMENT (docker-compose.yml : code monté, rechargement automatique).
+# Production : docker-compose.prod.yml, voir docs/DEPLOYMENT.md.
+COMPOSE ?= docker compose
+DB_DIR := backend_ecos_chatbot/data/postgres
+
+.PHONY: help setup reset seed corpus stations db-shell logs stop clean test backend-test frontend-test lint
 
 help:
-	@echo "🎓 ECOS CHATBOT - Commandes disponibles"
+	@echo "ECOS Chatbot - commandes de développement"
 	@echo ""
-	@echo "  make setup    - Démarre tous les services (DB + API + migration)"
-	@echo "  make seed     - Remplit la base avec des cas d'exemple (⚠️  services doivent être lancés)"
-	@echo "  make corpus   - Importe le référentiel officiel de cardiologie (CNEC/SFC) pour l'atelier"
-	@echo "  make stations - Importe les packs privés de stations (backend_ecos_chatbot/app/private/stations/)"
-	@echo "  make reset    - Arrête tout, supprime la DB et redémarre avec seed"
-	@echo "  make db-shell - Ouvre un shell PostgreSQL interactif"
-	@echo "  make logs     - Affiche les logs en temps réel"
-	@echo "  make stop     - Arrête tous les services"
-	@echo "  make clean    - Arrête et supprime tous les conteneurs/volumes"
-	@echo "  make test     - Lance un test complet du workflow CLI"
-	@echo ""
+	@echo "  make setup         Démarre la base, les migrations, l'API et le frontend"
+	@echo "  make seed          Remplit la base avec les cas d'exemple (refuse s'il y a des tentatives d'étudiants)"
+	@echo "  make corpus        Importe le référentiel de cardiologie (CNEC/SFC) pour l'atelier"
+	@echo "  make stations      Importe les packs privés (backend_ecos_chatbot/app/private/stations/)"
+	@echo "  make reset         Supprime la base de développement, redémarre et seed"
+	@echo "  make db-shell      Shell PostgreSQL"
+	@echo "  make logs          Journaux en continu"
+	@echo "  make stop          Arrête les services"
+	@echo "  make clean         Arrête et supprime conteneurs, volumes et base de développement"
+	@echo "  make backend-test  Tests du backend (SQLite en mémoire, modèles simulés)"
+	@echo "  make frontend-test Vérification des types, build et tests du frontend"
+	@echo "  make lint          Analyse statique du backend (ruff)"
+	@echo "  make test          Parcours CLI (liste des cas, aide pour jouer une station)"
 
 setup:
-	@echo "🚀 Démarrage des services Docker..."
-	cd backend_ecos_chatbot && docker-compose up -d
-	@echo "⏳ Attente que les services soient prêts..."
-	@sleep 5
-	@echo "✅ Services démarrés"
-	@echo ""
-	@echo "💡 Pour remplir la base avec des exemples :"
-	@echo "   make seed"
+	$(COMPOSE) up -d --build
+	@echo "API : http://localhost:8000   Frontend : http://localhost:5173"
+	@echo "Exemples : make seed"
 
 seed:
-	@echo "🌱 Remplissage de la base de données avec des cas d'exemple..."
-	cd backend_ecos_chatbot && docker-compose exec fastapi python seed_database.py
-	@echo ""
-	@echo "✅ Base de données seedée avec succès!"
-	@echo ""
-	@echo "🎯 Pour tester :"
-	@echo "   python ecos_cli.py case-list"
-	@echo "   python ecos_cli.py chat-loop 1"
+	$(COMPOSE) exec fastapi python seed_database.py
 
 corpus:
-	@echo "📚 Import du référentiel de cardiologie (CNEC/SFC, accord du collège et d'UNESS)..."
-	cd backend_ecos_chatbot && docker-compose exec fastapi python scripts/ingest_corpus.py
-	@echo "✅ Référentiel importé (relancer après un seed n'est pas nécessaire : il est conservé)"
+	$(COMPOSE) exec fastapi python scripts/ingest_corpus.py
 
 stations:
-	@echo "📦 Import des packs privés de stations (hors dépôt)..."
-	cd backend_ecos_chatbot && docker-compose exec fastapi python scripts/import_stations.py
+	$(COMPOSE) exec fastapi python scripts/import_stations.py
 
 reset:
-	@echo "🔄 Reset complet de l'environnement..."
-	@echo "⏹️  Arrêt des services..."
-	cd backend_ecos_chatbot && docker-compose down
-	@echo "🗑️  Suppression des données..."
-	rm -rf backend_ecos_chatbot/data/postgres
-	@echo "🚀 Redémarrage des services..."
-	cd backend_ecos_chatbot && docker-compose up -d
-	@echo "⏳ Attente de la disponibilité des services (15s)..."
-	@sleep 15
-	@echo "🌱 Seed de la base de données..."
-	cd backend_ecos_chatbot && docker-compose exec fastapi python seed_database.py
-	@echo ""
-	@echo "✅ Reset terminé avec succès!"
-	@echo ""
-	@echo "🎯 Environnement prêt pour les tests"
+	$(COMPOSE) down
+	rm -rf $(DB_DIR)
+	$(COMPOSE) up -d --build --wait database fastapi
+	$(COMPOSE) exec fastapi python seed_database.py
+	$(COMPOSE) up -d
 
 db-shell:
-	@echo "🐘 Connexion à PostgreSQL..."
-	cd backend_ecos_chatbot && docker-compose exec database psql -U ecos_chatbot -d ecos_chatbot_db
+	$(COMPOSE) exec database sh -c 'psql -U "$$POSTGRES_USER" -d "$$POSTGRES_DB"'
 
 logs:
-	@echo "📋 Logs en temps réel (Ctrl+C pour quitter)..."
-	cd backend_ecos_chatbot && docker-compose logs -f
+	$(COMPOSE) logs -f
 
 stop:
-	@echo "⏹️  Arrêt des services..."
-	cd backend_ecos_chatbot && docker-compose down
-	@echo "✅ Services arrêtés"
+	$(COMPOSE) down
 
 clean:
-	@echo "🧹 Nettoyage complet..."
-	cd backend_ecos_chatbot && docker-compose down -v
-	rm -rf backend_ecos_chatbot/data/postgres
-	@echo "✅ Nettoyage terminé"
+	$(COMPOSE) down -v
+	rm -rf $(DB_DIR)
+
+backend-test:
+	cd backend_ecos_chatbot/app && python -m pytest -q
+
+frontend-test:
+	cd frontend && npm ci && npm run build && npm test
+
+lint:
+	cd backend_ecos_chatbot/app && ruff check .
 
 test:
-	@echo "🧪 Test du workflow complet..."
-	@echo ""
-	@echo "1️⃣  Liste des cas disponibles:"
-	python ecos_cli.py case-list
-	@echo ""
-	@echo "2️⃣  Pour tester un cas d'interrogatoire:"
-	@echo "   python ecos_cli.py chat-loop 1"
-	@echo ""
-	@echo "3️⃣  Pour finaliser et évaluer:"
-	@echo "   python ecos_cli.py attempt-finalize <attempt_id>"
-	@echo "   python ecos_cli.py attempt-evaluate <attempt_id>"
-	@echo ""
+	python ecos_cli.py health
+	python ecos_cli.py list-cases
+	@echo "Jouer une station : python ecos_cli.py chat-loop <id>"
+	@echo "Puis : python ecos_cli.py attempt-finalize <attempt_id> && python ecos_cli.py attempt-evaluate <attempt_id>"

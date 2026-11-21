@@ -19,8 +19,8 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
+/lib/
+/lib64/
 parts/
 sdist/
 var/
@@ -123,8 +123,10 @@ $RECYCLE.BIN/
 # ============= Logs et Sessions =============
 *.log
 logs/
+# Fichiers texte locaux (clés, notes : keys.txt...) : jamais dans le dépôt
 *.txt
-!requirements.txt
+!requirements*.txt
+!LICENSE.txt
 
 # ============= Alembic =============
 # Ne pas ignorer les migrations, mais ignorer les fichiers temporaires
@@ -146,3 +148,8 @@ local.properties
 
 # ============= Documentation temporaire =============
 *.md.backup
+# Copies de travail des agents (Claude Code)
+.claude/worktrees/
+
+# Sauvegardes locales (deploy/sauvegarde.sh)
+sauvegardes/

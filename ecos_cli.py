@@ -392,7 +392,7 @@ def start() -> None:
 def health() -> None:
     """Ping rapide du serveur."""
     with _client(token=None) as c:
-        r = c.get("/")
+        r = c.get("/health")
         typer.echo(f"{r.status_code} {r.text[:200]}")
 
 

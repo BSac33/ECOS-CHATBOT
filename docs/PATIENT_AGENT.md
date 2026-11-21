@@ -191,7 +191,7 @@ ARBITER_TIMEOUT=2.0             # au-delà, le message est accepté par défaut
 ```
 
 vLLM doit être lancé avec `--enable-auto-tool-choice --tool-call-parser hermes`
-(voir `vllm/vllm-docker-compose.yml`). Le parser `hermes` fonctionne aussi avec Qwen2.5 si
+(voir `deploy/dmz/docker-compose.yml`). Le parser `hermes` fonctionne aussi avec Qwen2.5 si
 vous voulez revenir à `Qwen/Qwen2.5-7B-Instruct`.
 
 ## Tests

@@ -64,12 +64,12 @@ VLLM_ARBITER_BASE_URL=http://<adresse>:8002/v1
 VLLM_ARBITER_API_KEY=<clé>
 KYUTAI_STT_URL=ws://<adresse>:8090
 KYUTAI_TTS_URL=ws://<adresse>:8089
-KYUTAI_API_KEY=public_token
+KYUTAI_API_KEY=<MODELS_API_KEY>
 ```
 
-Limites du mode direct : trafic en clair (il reste dans le VPN), voix protégée par
-l'identifiant par défaut de moshi-server (`public_token`). À réserver aux tests, sans données
-réelles d'étudiants.
+Limites du mode direct : trafic en clair (il reste dans le VPN). La voix exige la même clé
+que vLLM (`MODELS_API_KEY`, passée à moshi-server en `KYUTAI_ID`). À réserver aux tests, sans
+données réelles d'étudiants.
 
 ## 1 bis. Partition de Docker trop petite
 
@@ -146,7 +146,7 @@ upstreams par `127.0.0.1:<port>` :
 - vLLM : `proxy_buffering off` (réponses en flux), `proxy_read_timeout 600s`, en-tête
   `Authorization` relayé (vLLM vérifie la clé) ;
 - Kyutai : WebSocket (`Upgrade`/`Connection`), `proxy_read_timeout 3600s`, contrôle de
-  `kyutai-api-key` puis remplacement par `public_token` ;
+  `kyutai-api-key` (relayé tel quel : moshi-server attend la même clé) ;
 - filtrage `allow`/`deny` sur l'adresse du serveur de l'application.
 
 Si le nginx est sur une autre machine : `MODELS_BIND` = adresse interne, et un pare-feu qui

@@ -1,0 +1,11 @@
+# Analyse statique (CI et « make lint ») : erreurs de syntaxe et pyflakes (noms indéfinis,
+# imports inutiles...). Les règles de style ne sont pas imposées.
+target-version = "py311"
+line-length = 120
+
+[lint]
+select = ["E9", "F"]
+
+[lint.per-file-ignores]
+"migrations/env.py" = ["F403"]
+"migrations/versions/*" = ["F401"]
