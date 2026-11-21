@@ -123,15 +123,37 @@ DELETE /api/users/me/attempts/{attempt_id}
 **Réponse:**
 ```json
 {
-  "message": "Attempt deleted successfully",
+  "message": "Tentative supprimée.",
   "id": "uuid-string"
 }
 ```
 
 **Comportement:**
-- Supprime la tentative ET tous ses messages (cascade)
-- Vérifie que la tentative appartient à l'utilisateur
-- Retourne 403 si accès refusé
+- Supprime la tentative et tout ce qui en dépend : messages, correction (et ses items),
+  signalements de modération ; les documents de la station restent
+- 404 si la tentative n'existe pas ou n'appartient pas à l'utilisateur
+
+### 5. Exporter mes données (RGPD)
+
+```http
+GET /api/users/me/export
+```
+
+Fichier JSON (`mes-donnees-ecos.json`) : compte (sans mot de passe), toutes les tentatives
+avec messages, corrections et signalements.
+
+### 6. Supprimer mon compte (RGPD)
+
+```http
+DELETE /api/users/me
+{"password": "..."}
+```
+
+- 204 : compte et toutes ses tentatives supprimés
+- 403 : mot de passe incorrect
+- 409 : compte auteur de stations (un administrateur doit d'abord les transférer)
+
+Purge par durée de conservation : `scripts/purge_donnees.py` (voir `docs/DEPLOYMENT.md`).
 
 ## Commandes CLI
 

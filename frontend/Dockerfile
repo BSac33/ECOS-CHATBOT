@@ -1,5 +1,5 @@
 # Mode développement avec hot reload
-FROM node:20-alpine
+FROM node:22-alpine
 
 WORKDIR /app
 
@@ -7,7 +7,7 @@ WORKDIR /app
 COPY package*.json ./
 
 # Installer les dépendances
-RUN npm install
+RUN npm ci
 
 # Copier le code source
 COPY . .

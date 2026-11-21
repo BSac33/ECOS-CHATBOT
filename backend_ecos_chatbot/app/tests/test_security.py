@@ -148,9 +148,8 @@ def test_example_secrets_refused(monkeypatch):
     with pytest.raises(RuntimeError, match="SECRET_KEY"):
         main.check_configuration()
     monkeypatch.setenv("SECRET_KEY", "a" * 64)
-    monkeypatch.setenv("DATABASE_URL", "postgresql://ecos:changeme@database/ecos")
-    with pytest.raises(RuntimeError, match="DATABASE_URL"):
-        main.check_configuration()
+    monkeypatch.setenv("DATABASE_URL", "postgresql://ecos:changez_moi@database/ecos")
+    main.check_configuration()            # base : avertissement seulement
     monkeypatch.setenv("DATABASE_URL", "postgresql://ecos:Xk29dj3@database/ecos")
     main.check_configuration()
 

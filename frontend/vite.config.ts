@@ -38,11 +38,6 @@ export default defineConfig({
         target: 'http://fastapi:8000',
         changeOrigin: true,
       },
-      // Rediriger les requêtes /files (storage) vers le backend
-      '/files': {
-        target: 'http://fastapi:8000',
-        changeOrigin: true,
-      },
     },
   },
 })

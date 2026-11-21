@@ -23,14 +23,25 @@ docker compose -f docker-compose.prod.yml up -d --build
 ```
 
 Services : `database` (PostgreSQL 16), `migrate` (Alembic à chaque démarrage, idempotent),
-`api` (FastAPI, `API_WORKERS` processus), `web` (nginx : frontend compilé + passerelle vers
-l'API). Le site est servi sur `http://<hôte>:${WEB_PORT:-8080}`.
+`api` (FastAPI, `API_WORKERS` processus, utilisateur sans privilèges), `web` (nginx :
+frontend compilé + passerelle vers l'API). Le site est publié sur
+`http://127.0.0.1:${WEB_PORT:-8080}`, c'est-à-dire **sur la machine seulement** : le reverse
+proxy HTTPS de l'établissement s'y branche. Pour l'ouvrir au réseau (tests, sans HTTPS) :
+`WEB_BIND=0.0.0.0` dans l'environnement de `docker compose`.
 
 nginx (`frontend/nginx.conf`) sert l'application monopage et relaie :
 
-- `/api/` vers l'API (préfixe retiré) ;
+- `/api/` vers l'API (préfixe retiré), délai de 10 min (correction automatique) ;
 - `/chat/attempts/` sans tampon (flux SSE du patient, WebSocket du mode vocal, 1 h) ;
-- `/attachments/` et `/files/` (documents de vignette, ECG, imagerie).
+- `/attachments/` (documents de vignette, ECG, imagerie : un étudiant ne reçoit que ceux
+  qui lui ont été montrés) ;
+- `/health` (supervision : API et base joignables).
+
+Il ajoute les en-têtes de sécurité (`frontend/security_headers.inc` : CSP, refus de
+l'affichage en cadre, micro limité au site) et limite le débit : 30 essais de connexion par
+minute et par adresse, 50 requêtes d'API par seconde ; au-delà, 429. L'adresse réelle du
+client est reprise de `X-Forwarded-For` quand la requête vient d'un réseau privé (reverse
+proxy). L'API refuse en plus 5 mots de passe faux par identifiant en 15 min.
 
 En production, placer un reverse proxy HTTPS devant `web` et mettre `SECURE_COOKIES=True`.
 Le micro du navigateur (mode vocal) n'est autorisé qu'en HTTPS ou sur `localhost`.
@@ -38,24 +49,31 @@ Le micro du navigateur (mode vocal) n'est autorisé qu'en HTTPS ou sur `localhos
 ### Comptes
 
 ```bash
-docker compose -f docker-compose.prod.yml exec api python scripts/create_user.py admin --role admin
-docker compose -f docker-compose.prod.yml exec api python scripts/create_user.py dupont --role teacher --full-name "Dr Dupont"
+docker compose -f docker-compose.prod.yml exec -u ecos api python scripts/create_user.py admin --role admin
+docker compose -f docker-compose.prod.yml exec -u ecos api python scripts/create_user.py dupont --role teacher --full-name "Dr Dupont"
 # sans saisie : -e ECOS_PASSWORD=... ; compte existant : --reset-password
 ```
+
+Les comptes ne se créent pas depuis le site : seul un administrateur peut en créer
+(script ci-dessus, ou `POST /auth/create-user` connecté en administrateur). Chaque
+utilisateur peut exporter ses données et supprimer son compte (page « Mon compte ») ; un
+enseignant auteur de stations ne peut pas supprimer le sien (transfert par un
+administrateur).
 
 ### Stations et référentiel
 
 ```bash
 # Cas d'exemple + packs privés de backend_ecos_chatbot/app/private/stations/ (monté en lecture seule)
-# ATTENTION : le seed vide d'abord les cas, tentatives et évaluations (installation initiale seulement)
-docker compose -f docker-compose.prod.yml exec api python seed_database.py
+# ATTENTION : le seed vide d'abord les cas, tentatives et évaluations (installation initiale
+# seulement) ; il refuse s'il trouve des tentatives d'étudiants (--force pour passer outre)
+docker compose -f docker-compose.prod.yml exec -u ecos api python seed_database.py
 
 # Pack privé ajouté ou mis à jour plus tard, sans rien effacer (idempotent : copier le pack
 # dans private/stations/ puis importer tous les packs)
-docker compose -f docker-compose.prod.yml exec api python scripts/import_stations.py
+docker compose -f docker-compose.prod.yml exec -u ecos api python scripts/import_stations.py
 
 # Référentiel officiel de cardiologie (CNEC/SFC) pour l'assistant de rédaction
-docker compose -f docker-compose.prod.yml exec api python scripts/ingest_corpus.py
+docker compose -f docker-compose.prod.yml exec -u ecos api python scripts/ingest_corpus.py
 ```
 
 Les packs privés (contenu du livre) et les textes du référentiel ne sont jamais dans l'image
@@ -151,6 +169,78 @@ for url, key in [('VLLM_BASE_URL', 'VLLM_API_KEY'), ('VLLM_ARBITER_BASE_URL', 'V
 ```
 
 Puis, sur le site, lancer une station d'interrogatoire en compte étudiant.
+
+## 4. Exploitation
+
+### Mise à jour
+
+```bash
+git pull
+docker compose -f docker-compose.prod.yml up -d --build   # migrations appliquées par « migrate »
+```
+
+L'API refuse de démarrer si `SECRET_KEY` vaut encore la valeur d'exemple (n'importe qui
+pourrait fabriquer une session administrateur) : `openssl rand -hex 32`, à coller dans
+`fastapi.env`. Changer la clé déconnecte tout le monde, rien d'autre. Un mot de passe
+d'exemple dans `DATABASE_URL` donne seulement un avertissement dans les journaux.
+
+### Supervision et journaux
+
+- `GET /health` : `{"status": "ok", "database": true}`, ou 503 si la base est injoignable
+  (utilisé par le healthcheck Docker) ;
+- `docker compose -f docker-compose.prod.yml logs -f api` ; niveau : `LOG_LEVEL` (INFO) ;
+  le contenu des conversations et les mots de passe ne sont jamais journalisés.
+
+### Sauvegardes
+
+```bash
+deploy/sauvegarde.sh                          # base (pg_dump) + documents, dans ./sauvegardes/
+DOSSIER=/mnt/sauvegardes SAUVEGARDES_A_GARDER=30 deploy/sauvegarde.sh
+# cron, chaque nuit :
+# 17 2 * * * cd /chemin/ECOS-CHATBOT && deploy/sauvegarde.sh >> sauvegardes/journal.txt 2>&1
+```
+
+Copier aussi les sauvegardes hors du serveur. Restauration (écrase la base actuelle) :
+
+```bash
+C="docker compose -f docker-compose.prod.yml"
+$C exec -T database sh -c 'pg_restore -U "$POSTGRES_USER" -d "$POSTGRES_DB" --clean --if-exists --no-owner' \
+  < sauvegardes/base_AAAA-MM-JJ_HHMM.dump
+$C exec -T -u ecos api tar -C /app -xzf - < sauvegardes/documents_AAAA-MM-JJ_HHMM.tar.gz
+$C restart api
+```
+
+### Durée de conservation (RGPD)
+
+Les tentatives (messages, corrections, signalements) sont gardées jusqu'à leur suppression
+par l'étudiant ou par la purge, à planifier avec la durée fixée par le délégué à la protection
+des données :
+
+```bash
+docker compose -f docker-compose.prod.yml exec -T -u ecos api python scripts/purge_donnees.py --mois 24 --simulation
+docker compose -f docker-compose.prod.yml exec -T -u ecos api python scripts/purge_donnees.py --mois 24
+```
+
+### Variables utiles (`fastapi.env`)
+
+| Variable | Défaut | Rôle |
+|---|---|---|
+| `API_WORKERS` (compose) | 2 | processus uvicorn |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_TIMEOUT` | 10 / 20 / 30 s | connexions par processus ; workers × (taille + débord) < `max_connections` (100) |
+| `EVALUATION_TIMEOUT` | 180 | délai d'un appel de correction (s), 3 essais |
+| `EVALUATION_SEED` | 1234 | graine de la correction (reproductible) |
+| `PATIENT_AGENT_TIMEOUT` | 30 | délai d'une réplique du patient (s) |
+| `ARBITER_TIMEOUT` | 2.0 | délai de l'arbitre (s), au-delà le message passe |
+| `DOCS_ENABLED` | false | documentation de l'API sur `/docs` (à laisser fermée en production) |
+| `LOG_LEVEL` | INFO | niveau des journaux |
+| `WEB_BIND` / `WEB_PORT` (compose) | 127.0.0.1 / 8080 | adresse et port publiés du site |
+
+### Licences des modèles
+
+Qwen3-8B (patient, correction) est sous licence Apache 2.0. **Qwen2.5-3B-Instruct
+(arbitre) est sous licence de recherche Qwen** : usage non commercial seulement. Pour une
+offre payante, le remplacer par un modèle Apache 2.0 (par exemple Qwen2.5-1.5B/7B-Instruct
+ou Qwen3-4B, à valider avec `scripts/arbiter_bench.py`).
 
 ## Flux réseau à ouvrir
 

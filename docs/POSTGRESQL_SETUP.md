@@ -57,47 +57,31 @@ GRANT ALL PRIVILEGES ON DATABASE ecos_chatbot TO ecos_user;
 psql -U ecos_user -d ecos_chatbot -h localhost
 ```
 
-## Configuration de l'application
+## Configuration de l'application (hors Docker)
 
-### 1. Copier le fichier d'environnement
+En temps normal, PostgreSQL tourne dans Docker (`docker-compose.yml` en développement,
+`docker-compose.prod.yml` en production : voir `docs/DEPLOYMENT.md`). Pour lancer l'API à la
+main contre une base locale :
+
 ```bash
-cd Backend
-cp .env.example .env
-```
+cd backend_ecos_chatbot
+cp fastapi.env.production.example fastapi.env
+# éditer : DATABASE_URL=postgresql://ecos_user:<mot de passe>@localhost:5432/ecos_chatbot
+#          SECRET_KEY=$(openssl rand -hex 32), VLLM_* (modèles), CORS_ORIGINS, SECURE_COOKIES=False
 
-### 2. Modifier le fichier .env
-Ajustez les paramètres selon votre configuration:
-```env
-DATABASE_URL=postgresql://ecos_user:ecos_password@localhost:5432/ecos_chatbot
-GEMINI_API_KEY=votre_clé_api
-```
-
-### 3. Installer les dépendances Python
-```bash
+cd app
 pip install -r requirements.txt
+alembic upgrade head                                   # crée les tables
+python scripts/create_user.py admin --role admin       # premier compte
+python seed_database.py                                # cas d'exemple (base vide seulement)
+DOCS_ENABLED=true uvicorn main:app --reload            # documentation sur /docs
 ```
 
-### 4. Initialiser la base de données
-```bash
-# Créer les tables et insérer les données de démo
-python init_db.py
-```
-
-## Utilisation
-
-### Démarrer le serveur
-```bash
-# Depuis le dossier Backend
-uvicorn main:app --reload
-
-# Ou depuis la racine du projet
-uvicorn Backend.main:app --reload
-```
-
-### Accéder à l'API
-- API: http://localhost:8000
-- Documentation interactive: http://localhost:8000/docs
-- Documentation alternative: http://localhost:8000/redoc
+- API : http://localhost:8000 ; supervision : http://localhost:8000/health
+- Documentation interactive (`/docs`, `/redoc`) : seulement avec `DOCS_ENABLED=true`
+- Taille du pool de connexions par processus : `DB_POOL_SIZE` (10), `DB_MAX_OVERFLOW` (20),
+  `DB_POOL_TIMEOUT` (30 s). Total à garder sous `max_connections` de PostgreSQL (100 par
+  défaut) : nombre de workers × (taille + débord).
 
 ## Commandes utiles PostgreSQL
 

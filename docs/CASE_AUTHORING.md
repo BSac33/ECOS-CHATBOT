@@ -156,7 +156,7 @@ non fournies retirées, jargon signalé. Les éléments écartés sont listés s
 *précision facultative* (ex. « patiente plus âgée, très anxieuse ») peut orienter l'assistant.
 
 Configuration (`fastapi.env`) : un serveur **vLLM** (par défaut celui du patient, Qwen3-8B).
-L'intégration Gemini de la codebase est historique et n'est pas utilisée par l'atelier.
+L'ancienne intégration Gemini a été retirée : seul vLLM est pris en charge.
 
 ```bash
 AUTHORING_BASE_URL=   # vide = VLLM_BASE_URL (serveur du patient)

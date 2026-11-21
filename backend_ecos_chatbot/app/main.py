@@ -38,11 +38,15 @@ PLACEHOLDERS = ("changez_moi", "changeme", "your-secret-key", "your_production_a
 
 
 def check_configuration() -> None:
-    """Refuse de démarrer avec une valeur d'exemple non remplacée (fichiers *.example)."""
-    for name in ("SECRET_KEY", "DATABASE_URL"):
-        value = (os.getenv(name) or "").lower()
-        if any(p in value for p in PLACEHOLDERS):
-            raise RuntimeError(f"{name} contient encore une valeur d'exemple : remplacez-la dans fastapi.env")
+    """Refuse de démarrer avec la clé de signature d'exemple (n'importe qui pourrait fabriquer
+    une session administrateur). Mot de passe d'exemple de la base : avertissement seulement
+    (la base n'est pas exposée hors du réseau Docker, et le changer demande un ALTER USER)."""
+    if any(p in (os.getenv("SECRET_KEY") or "").lower() for p in PLACEHOLDERS):
+        raise RuntimeError("SECRET_KEY contient encore la valeur d'exemple : remplacez-la dans fastapi.env "
+                           "(openssl rand -hex 32)")
+    if any(p in (os.getenv("DATABASE_URL") or "").lower() for p in PLACEHOLDERS):
+        logger.warning("DATABASE_URL utilise le mot de passe d'exemple : changez-le (ALTER USER dans PostgreSQL, "
+                       "puis postgres.env et fastapi.env)")
     if len(os.getenv("SECRET_KEY") or "") < 32:
         logger.warning("SECRET_KEY courte : utilisez au moins 32 caractères aléatoires (openssl rand -hex 32)")
     if os.getenv("LLM_PROVIDER", "vllm").lower() != "vllm":

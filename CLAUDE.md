@@ -9,7 +9,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Tech Stack
 - **Backend**: FastAPI + SQLAlchemy/SQLModel + PostgreSQL
 - **Frontend**: Vue 3 + TypeScript + Vite + PrimeVue
-- **AI**: vLLM (Qwen) with structured output; the Google Gemini path (`ai_chat_utils.py`) is legacy, do not use it for new features
+- **AI**: vLLM (Qwen) with structured output (Gemini support was removed; do not reintroduce it)
 - **Deployment**: Docker Compose
 - **CLI**: Typer-based Python CLI for testing
 
@@ -122,7 +122,10 @@ alembic downgrade -1
 - `user_routes.py` - User statistics and attempt history
 - `admin_routes.py` - Case and evaluation grid management (admin only)
 - `attachment_routes.py` - File upload/download for case resources
-- `evaluation_routes.py` - Post-exam evaluation with LLM
+- `evaluation_routes.py` - Post-exam evaluation (cache, 503 without saving on failure, silent student = 0 without LLM) and teacher review: `GET /evaluation/attempts/{id}/review`, `PATCH .../items/{item_id}` (override, totals recomputed, `reviewed_by`), `POST .../reevaluate`; reviewers = case author or admin
+- `evaluation_service.py` - LLM grading call: strict json_schema, temperature 0 + `EVALUATION_SEED`, transcript wrapped in `<transcription>` tags (data, not instructions), retries on invalid / truncated / incomplete output (`MAX_ATTEMPTS`), then `EvaluationUnavailable`
+- `user_data.py` - GDPR: `export_user`, `delete_user` (refused for case authors), `delete_attempt` (FK order), `purge_attempts` (`scripts/purge_donnees.py`); routes `GET /api/users/me/export`, `DELETE /api/users/me`
+- `main.py` - App setup: refuses to start with the example `SECRET_KEY`, Origin check on unsafe methods (CSRF), `/docs` only if `DOCS_ENABLED`, `GET /health`
 - `authoring_routes.py` - Case authoring workshop for teachers (`/authoring`): drafts, compiled preview, checks, versioned publish, teacher test attempts, assistant, reference search, optional peer review (`review_status` a_relire/relue, never blocks publication; reviewers get read-only access and can test). See `docs/CASE_AUTHORING.md`
 
 **Case Authoring:**
@@ -132,12 +135,11 @@ alembic downgrade -1
 - `corpus.py` - Official 2nd-cycle reference: SFC/CNEC chapter parser (R2C item, starting situations, ranked objectives, ranked excerpts), idempotent `store_chapter`, BM25 `search_corpus`. Import: `scripts/ingest_corpus.py`. Texts live in the DB only, never in the repo (agreement of the cardiology college and UNESS; tests use a fictitious chapter)
 - `case_examples.py` - Dupont case as a structured sheet (used by the seed and tests)
 - Station formats: `station.domain` (11 ECOS-N domains), `station.interlocutor` (`patient` | `professionnel`: simulated health professional (PSS) with its own role rules in `patient_agent.PROFESSIONAL_RULES`, never does the student's work | `aucun`: no PS/PSS, the student talks alone, nothing replies), `station.documents` (vignette documents shown at start), attitude scales (0-4) + global rating, teaching content shown at debrief
-- `scoring.py` - Recomputes item totals, attitude scales and the /20 score (`20 × ((1−p)·items + p·scales/4)`, p = `attitude_weight`, default 0.25); never trusts LLM sums
+- `scoring.py` - Recomputes item totals, attitude scales and the /20 score (`20 × ((1−p)·items + p·scales/4)`, p = `attitude_weight`, default 0.25); never trusts LLM sums. Points need a student `citation`: none → 0; not found in the student's words (normalized substring or ≥ 80 % trigrams) → `citation_found=False`, `needs_review=True`; `recompute_totals` after a teacher override
 - `station_packs.py` - Private station packs (JSON sheets + images, dir or .zip) imported idempotently by `clinical_cases.source_key`; `scripts/import_stations.py`; the seed imports `private/stations/` (git-ignored) and `STATION_PACKS`. Protected content (e.g. the author's ECOS book) must never be committed: the repository is public
 
 **AI Utilities:**
-- `ai_chat_utils.py` - Gemini API integration for patient simulation
-- `vllm_chat_utils.py` - vLLM integration with structured output (Pydantic schemas)
+- `vllm_chat_utils.py` - Legacy patient reply without tools (`PATIENT_AGENT_ENABLED=false`) and `build_patient_system_instruction`
 - `arbiter.py` - Fast student-message arbiter: lexical prefilter (instant block), LRU verdict cache, minimal LLM call (`{"category","tone"}` JSON, fixed system prompt for vLLM prefix caching, reused client, `ARBITER_TIMEOUT` then fail-open). Benchmark: `scripts/arbiter_bench.py`
 - `kyutai_voice.py` - Kyutai STT/TTS clients (moshi-server WebSocket + msgpack protocol, 24 kHz float32 PCM), `WordChunker` (LLM text deltas -> whole words for TTS)
 - `voice_routes.py` - Voice mode WebSocket `/chat/attempts/{id}/voice`: push-to-talk (`start`/`stop`) or hands-free consultation (`conversation_start`: continuous STT, end of turn when pause probability > 0.6, barge-in by voice with echo filter, false-start merge). STT -> shared `_run_turn` -> TTS word by word; barge-in cuts the voice only, the reply text is still persisted. Interrupting the patient is an ECOS fault: recorded on the patient message (`interrupted_by` voice|push_to_talk|button, `spoken_content` = words actually spoken, from TTS word timestamps), used in patient history, evaluation transcript and debrief. See `docs/VOICE.md`
@@ -147,6 +149,7 @@ alembic downgrade -1
 
 **Storage:**
 - `storage.py` - Local file storage for attachments
+- `attachment_routes.py` - Upload type sniffed from content (magic bytes, `checked_upload`), files served with nosniff + sandbox CSP; students only download documents shown in their own attempts
 - `storage/` directory - Uploaded files (PDFs, images, etc.)
 
 ### Frontend Structure (`frontend/src/`)
@@ -156,20 +159,22 @@ alembic downgrade -1
 - `Dashboard.vue` - Case selection dashboard for students
 - `ChatView.vue` - Interactive patient interview interface (text via SSE, push-to-talk, hands-free oral consultation)
 - `components/VoiceConsultation.vue` - Oral consultation screen: no text by default (transcript still persisted), patient status, mic level, examiner notes
-- `Debrief.vue` - Post-evaluation results display
-- `authoring/` - Case authoring workshop (`/atelier`, teachers/admins): `AuthoringCases.vue`, `CaseEditor.vue` (tabs, autosave, checks, test, publish), `FactsEditor.vue`, `GridEditor.vue`, `AssistantPanel.vue`, `CorpusSearch.vue`, `api.ts`
+- `Debrief.vue` - Post-evaluation results display (503 → retry, citations, "relue par un enseignant")
+- `AccountView.vue` - `/compte`: export my data, delete my account
+- `authoring/` - Case authoring workshop (`/atelier`, teachers/admins): `AuthoringCases.vue`, `CaseEditor.vue` (tabs, autosave, checks, test, publish, "Tentatives" tab = `CaseAttempts.vue`), `AttemptReview.vue` (`/atelier/tentatives/:attemptId`: transcript + item overrides), `FactsEditor.vue`, `GridEditor.vue`, `AssistantPanel.vue`, `CorpusSearch.vue`, `api.ts`
 
 **Components:**
 - `ChatHeader.vue` - Case info + countdown timer
 - `Message.vue` - Chat message bubble
 - `Textbox.vue` - Student message input
 - `EvaluationItem.vue` - Individual evaluation criterion display
-- `CasesList.vue` - Clinical case cards with filters
-- `LoginForm.vue` - Authentication form
+- `LoginForm.vue` - Authentication form (no demo credentials)
 
 **Services:**
-- `services/api.ts` - HTTP client wrapper for backend API calls
-- `stores/` - Pinia state management (auth, user)
+- `services/http.ts` - Single HTTP client: base `/api` (nginx and the Vite proxy strip it), cookies, timeouts, French error messages, 401 → `/login?redirect=`
+- `services/api.ts` - Typed API calls; `services/chat.ts` + `services/sse.ts` - streamed chat turns; `types.ts` - shared types
+- `stores/` - Pinia state management (auth)
+- Tests: Vitest (`npm test`, `src/**/*.test.ts`)
 - `router/` - Vue Router configuration
 
 ### Key Concepts
@@ -234,6 +239,7 @@ POST /evaluation/attempts/{id}/evaluate
 #### Authentication System
 - Uses **JWT tokens stored in HttpOnly cookies** (not localStorage)
 - `auth.py` provides `check_authorization` dependency
+- Accounts are created by admins only (`scripts/create_user.py` or `POST /auth/create-user` as admin); one error message for unknown user / wrong password; `LoginThrottle` (5 failures per username, 30 per IP, 15 min) + nginx rate limits
 - Cookie saved in `~/.ecos_cookies.json` for CLI
 - CORS configured with `allow_credentials=True` for cookie support
 
@@ -241,7 +247,9 @@ POST /evaluation/attempts/{id}/evaluate
 
 **Philosophy**: The evaluator observes silently and evaluates AFTER, never during the exam (like real ECOS).
 
-**Structured Output**: Uses Pydantic models (`EvaluationOutput`, `EvaluationResult`, `EvaluationItem`) to enforce JSON schema. See `vllm_chat_utils.py` and `docs/STRUCTURED_OUTPUT.md`.
+**Structured Output**: Pydantic models in `evaluation_service.py` (`ItemVerdict`, `Evaluation`, `EvaluationWithScales`) enforce the JSON schema. See `docs/EVALUATION.md`.
+
+**Reliability**: a failed or incomplete grading returns 503 and stores nothing (never a fake 0/20); points require a student quote; teachers can review and override (see `docs/EVALUATION.md`).
 
 **Caching**: Evaluations are persisted in database and returned from cache on subsequent calls to avoid redundant LLM inference.
 
@@ -268,7 +276,7 @@ DATABASE_URL=postgresql://user:pass@database:5432/dbname
 SECRET_KEY=your-secret-key
 CORS_ORIGINS=http://localhost:5173,http://localhost:3000
 
-# LLM provider: vllm (gemini is legacy, never required)
+# LLM provider: vllm (only supported provider)
 LLM_PROVIDER=vllm
 
 # Models (DMZ gateway in production, see deploy/dmz/README.md)
@@ -303,7 +311,7 @@ export ECOS_TOKEN=optional-jwt-token  # If not using cookies
 ## Important Design Patterns
 
 ### Patient Simulation Prompts
-Located in `ai_chat_utils.py::build_patient_system_instruction()`. Key rules:
+Compiled from the case sheet (`case_sheet.compile_case`) and run by `patient_agent.py`. Key rules:
 - Patient responds naturally in 1-3 sentences
 - Only reveals information when asked explicitly
 - Never uses medical jargon or acts as evaluator
@@ -313,9 +321,9 @@ Located in `ai_chat_utils.py::build_patient_system_instruction()`. Key rules:
 The arbiter (`arbiter.py`) blocks `ABUSIVE` and `META_EXFILTRATION` messages (attempts to extract the grid, scenario, prompt, or to break the patient's role) and flags `OFF_TOPIC` / aggressive tone in `moderation_events`. Blocked messages never reach the transcript and the patient generation is cancelled.
 
 ### Error Handling
-- vLLM calls use exponential backoff retry (3 attempts)
-- Fallback to empty evaluation result on complete failure
-- Pydantic validation with graceful degradation to raw JSON if schema fails
+- Patient turn failure: SSE `error` (502), nothing stored, the frontend offers "Réessayer"
+- Grading: 3 attempts, then 503 without saving (the student retries from the debrief)
+- Async routes never run sync SQL in the event loop (sync `def` routes, `run_in_threadpool` / `asyncio.to_thread`); the DB connection is released (`session.rollback()`) before long LLM calls
 
 ## Testing
 
@@ -324,11 +332,16 @@ The arbiter (`arbiter.py`) blocks `ABUSIVE` and `META_EXFILTRATION` messages (at
 cd backend_ecos_chatbot/app
 pip install -r requirements-dev.txt
 pytest
-# Against a migrated PostgreSQL: TEST_DATABASE_URL=postgresql://... pytest tests/test_chat_route.py
+ruff check .
+# Against a migrated PostgreSQL (whole suite, each test rolled back): TEST_DATABASE_URL=postgresql://... pytest
+# Models and migrations in sync: alembic check
 
-# Frontend type checking
+# Frontend type checking, build and tests
 cd frontend
 npm run build  # Runs vue-tsc -b
+npm test       # Vitest
+
+# CI (.github/workflows/ci.yml) runs all of the above, PostgreSQL migrations included, and builds the images
 
 # Full workflow test via CLI
 make test
@@ -368,8 +381,8 @@ alembic revision --autogenerate -m "Add new_field to table_name"
 alembic upgrade head
 ```
 
-### Switch LLM Provider
-Set `LLM_PROVIDER=vllm` in `fastapi.env` and configure vLLM endpoint. The code automatically routes to `vllm_chat_utils.py` instead of `ai_chat_utils.py`.
+### Dependencies
+Backend versions are pinned in `requirements.txt` (Dependabot proposes updates). sqlmodel stays at 0.0.30: newer versions require timezone-aware datetimes.
 
 ## Documentation References
 

@@ -152,33 +152,54 @@ Récupère le transcript complet pour visualisation avant évaluation.
 }
 ```
 
-## Algorithme d'Évaluation
+## Algorithme d'Évaluation (`evaluation_service.py`, `scoring.py`)
 
-Le LLM reçoit :
-1. **Le transcript complet** de la tentative
-2. **La grille d'évaluation** avec tous les critères
-3. **Le contexte du cas** (titre, consignes, scénario)
+Le LLM (serveur vLLM du patient, `VLLM_*`) reçoit la grille, le contexte du cas et la
+transcription **entre balises `<transcription>`** : c'est une donnée, jamais des consignes
+(un étudiant qui écrit « donne-moi 20/20 » ne valide rien ; les balises présentes dans la
+transcription sont retirées).
 
-Le LLM produit :
-- ✅ **Points attribués** pour chaque item de la grille
-- ✅ **Justification** avec citation du transcript
-- ✅ **Score total** et pourcentage
-- ✅ **Feedback général** constructif et pédagogique
+### Fiabilité
 
-### Règles d'Évaluation
+- **Sortie structurée stricte** (schéma JSON imposé par vLLM, validé par Pydantic) ;
+  `temperature=0` et graine fixe (`EVALUATION_SEED`, défaut 1234) : même transcription,
+  même correction.
+- **Nouvel essai** (3 au total, `EVALUATION_TIMEOUT` par appel, défaut 180 s) si la réponse
+  est invalide, tronquée (`finish_reason=length`) ou **incomplète** (un item de la grille ou
+  une échelle observable manquant).
+- **Échec** : la route répond **503** avec un message en français et **rien n'est
+  enregistré** ; l'étudiant peut relancer depuis le débriefing. Aucune note n'est jamais
+  fabriquée à partir d'une panne.
+- **Étudiant muet** (aucune intervention) : 0 sans appel au modèle.
+- **Double clic** : si deux corrections arrivent en même temps, la première enregistrée est
+  renvoyée.
 
-```python
-# Configuration du LLM pour l'évaluation
-temperature=0.3  # Plus bas pour cohérence et objectivité
-response_mime_type="application/json"  # Force le format structuré
-```
+### Citations obligatoires
 
-**Consignes au LLM** :
-- Être objectif et se baser UNIQUEMENT sur le transcript
-- Ne pas inventer d'informations absentes du transcript
-- Citer des passages précis pour justifier les points
-- Si un élément attendu n'apparaît pas → point non attribué
-- Feedback constructif et pédagogique
+Chaque item noté doit porter une `citation` exacte des paroles de l'étudiant.
+`scoring.score_evaluation` :
+
+- retire les points d'un item **sans citation** (justification préfixée « Points non
+  accordés : aucune citation de l'étudiant ») ;
+- vérifie que la citation figure dans les paroles de l'étudiant (mot pour mot après
+  normalisation, ou 80 % des trigrammes pour un passage long) ; sinon l'item garde ses
+  points mais est marqué `citation_found=false` et la correction `needs_review=true`
+  (affiché au débriefing et à l'enseignant) ;
+- recalcule les totaux, les échelles et la note /20 : le LLM ne fait jamais les sommes.
+
+### Relecture par l'enseignant
+
+L'auteur de la station (ou un administrateur) peut relire et corriger :
+
+| Route | Rôle |
+|---|---|
+| `GET /authoring/cases/{id}/attempts` | Tentatives de la station (étudiant, date, note, à relire) |
+| `GET /evaluation/attempts/{id}/review` | Transcription + correction |
+| `PATCH /evaluation/attempts/{id}/items/{item_id}` | Points (≤ points de l'item) et justification ; note recalculée, item `overridden`, `reviewed_by` / `reviewed_at` |
+| `POST /evaluation/attempts/{id}/reevaluate` | Nouvelle correction automatique (remplace l'ancienne) |
+
+Interface : onglet « Tentatives » de l'éditeur de station, page `/atelier/tentatives/:id`.
+L'étudiant voit la correction modifiée et la mention « relue par un enseignant ».
 
 ## Frontend - Affichage des Résultats
 
@@ -451,72 +472,3 @@ Ajouter des contraintes de validation :
 - Export PDF du résultat d'évaluation
 - Export CSV pour analyse statistique
 - Dashboard de progression pour l'étudiant
-
-## Migration depuis l'Ancien Système
-
-### Changements Majeurs
-
-❌ **SUPPRIMÉ** :
-- `evaluator_prompt` dans `ClinicalCase`
-- `generate_evaluator_reply()` dans `ai_chat_utils.py`
-- Mode "évaluateur en chat" dans `chat_routes.py`
-
-✅ **AJOUTÉ** :
-- `evaluate_attempt_with_llm()` pour évaluation post-examen
-- Routes `/evaluation/attempts/{id}/evaluate` et `/transcript`
-- Modèles Pydantic `EvaluationItemOut`, `EvaluationResultOut`, `EvaluationOut`
-- Vérification du type de station avant autorisation du chat
-
-### Migration de la Base de Données
-
-```sql
--- Retirer la colonne evaluator_prompt (si migration Alembic)
-ALTER TABLE clinical_cases DROP COLUMN evaluator_prompt;
-
--- Ajouter des commentaires sur patient_prompt
-COMMENT ON COLUMN clinical_cases.patient_prompt IS 
-  'Prompt pour role-play patient. Obligatoire pour patient_interview, diagnosis_announcement, mixed. NULL pour exam_analysis, procedure.';
-```
-
-### Code Existant à Mettre à Jour
-
-Si du code appelait l'ancien système :
-
-```python
-# ❌ ANCIEN (ne fonctionne plus - supprimé)
-response = generate_evaluator_reply(
-    evaluator_prompt=case.evaluator_prompt,  # Ce champ n'existe plus
-    scenario_context=case.scenario_context,
-    history=history,
-    student_message=message
-)
-
-# ✅ NOUVEAU (après finalisation de la tentative)
-# L'évaluation ne se fait PLUS en temps réel pendant le chat
-# Elle se fait après la fin de la station via l'API d'évaluation
-evaluation = evaluate_attempt_with_llm(
-    transcript=full_transcript,
-    evaluation_grid=grid.items,
-    case_context=case_context
-)
-```
-
-**Philosophie :** L'évaluateur observe silencieusement et évalue APRÈS, pas pendant.
-evaluation = evaluate_attempt_with_llm(
-    transcript=full_transcript,
-    evaluation_grid=grid.items,
-    case_context=case_context
-)
-```
-
-## Résumé
-
-| Aspect | Ancien Système | Nouveau Système |
-|--------|---------------|-----------------|
-| Évaluateur en chat | ✅ Mode "correcteur" en temps réel | ❌ Supprimé (non réaliste) |
-| Évaluation | ❌ Pas implémentée | ✅ Post-examen avec grille |
-| Persistance | ❌ Pas de sauvegarde | ✅ Tables BDD + caching |
-| Stations sans patient | ⚠️ Mode évaluateur confus | ✅ Pas de chat, réponse unique |
-| Format de sortie | Texte libre | JSON structuré (Pydantic) |
-| Justifications | Non | Oui, avec citations |
-| Affichage Frontend | ❌ Pas implémenté | ✅ Page Debrief complète |
