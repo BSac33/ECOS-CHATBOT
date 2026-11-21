@@ -18,6 +18,7 @@ AUTHORING_API_KEY) ; par défaut le serveur vLLM du patient (VLLM_*).
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from functools import lru_cache
@@ -319,7 +320,10 @@ async def assist(sheet: CaseSheet, task: str, session=None, instructions: str = 
     if task == "grille" and not sheet.facts:
         raise AssistantInputError("Ajoutez d'abord les faits du cas : la grille s'appuie dessus.")
 
-    hits = retrieve(session, sheet, task)
+    # Recherche (SQL + BM25) dans un thread, puis connexion rendue avant l'appel au modèle
+    hits = await asyncio.to_thread(retrieve, session, sheet, task)
+    if session is not None:
+        session.rollback()
     by_id = {h.chunk_id: h for h in hits}
     proposal.sources = [_source_ref(h) for h in hits]
 

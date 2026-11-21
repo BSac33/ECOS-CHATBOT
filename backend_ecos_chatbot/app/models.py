@@ -1,11 +1,9 @@
 from enum import Enum
 from typing import List, Optional
 from uuid import UUID, uuid4
-from click import Option
-from sqlalchemy import false
 from sqlmodel import Field, Relationship, SQLModel
-from datetime import date, datetime
-from sqlalchemy import Column
+from datetime import datetime
+from sqlalchemy import Column, Index
 from sqlalchemy.types import JSON
 from pydantic import BaseModel
 from pydantic import Field as PydanticField
@@ -19,8 +17,11 @@ class AttemptOut(BaseModel):
     created_at: str
     is_completed: bool
 
+MAX_CHAT_MESSAGE_CHARS = 2000
+
+
 class ChatIn(BaseModel):
-    message: str
+    message: str = PydanticField(min_length=1, max_length=MAX_CHAT_MESSAGE_CHARS)
 
 class ExaminerNoteOut(BaseModel):
     """Information transmise par l'examinateur (hors personnage patient).
@@ -72,6 +73,10 @@ class EvaluationItemOut(BaseModel):
     points_possible: float
     is_validated: bool
     justification: str
+    edn_code: Optional[str] = None
+    citation: Optional[str] = None            # paroles de l'étudiant qui valident l'item
+    citation_found: Optional[bool] = None     # False : citation introuvable, à relire
+    overridden: bool = False                  # modifié par un enseignant
 
 class ScaleRatingOut(BaseModel):
     """Échelle d'attitude cotée de 0 à 4 (None : non évaluable ou non évaluée)"""
@@ -104,6 +109,9 @@ class EvaluationResultOut(BaseModel):
     global_performance: Optional[GlobalPerformanceOut] = None
     attitude_weight: Optional[float] = None
     score_20: Optional[float] = None
+    needs_review: bool = False                # au moins une citation introuvable
+    reviewed_by: Optional[str] = None         # relecture par un enseignant
+    reviewed_at: Optional[str] = None
 
 class EvaluationOut(BaseModel):
     """Enveloppe pour le résultat d'évaluation"""
@@ -389,19 +397,12 @@ class User(SQLModel, table=True):
     
     role: UserRole = Field(default=UserRole.student, index=True)
     
-class Role(SQLModel, table=True):
-    __tablename__ = "roles"
-    
-    id: Optional[int] = Field(default=None, primary_key=True)
-    name: UserRole = Field(index=True, unique=True)
-    description: Optional[str] = None
-    
 class Attempts(SQLModel, table=True):
     __tablename__ = "attempts"
     
     id: UUID = Field(default_factory=uuid4, primary_key=True)
-    user_id: int = Field(foreign_key="users.id")
-    case_id: int = Field(foreign_key="clinical_cases.id")
+    user_id: int = Field(foreign_key="users.id", index=True)
+    case_id: int = Field(foreign_key="clinical_cases.id", index=True)
     created_at: datetime | None = Field(default_factory=datetime.now)
     expires_at: Optional[datetime] = None  # Heure de fin du temps imparti
     completed_at: Optional[datetime] = None  # Timestamp de finalisation
@@ -414,6 +415,8 @@ class Attempts(SQLModel, table=True):
     
 class Message(SQLModel, table=True):
     __tablename__ = "chat_messages"
+    # Historique relu à chaque tour : messages d'une tentative dans l'ordre
+    __table_args__ = (Index("ix_chat_messages_attempt_created", "attempt_id", "created_at"),)
     
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     attempt_id: UUID = Field(foreign_key="attempts.id")

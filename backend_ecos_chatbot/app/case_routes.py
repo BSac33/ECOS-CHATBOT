@@ -8,13 +8,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select
 from auth import get_current_user
 from db import get_session
-from models import User, ClinicalCase, ClinicalCasePublicOut, DisciplineItem, EDNItem
+from models import User, ClinicalCase, ClinicalCasePublicOut
 
 router = APIRouter()
 
 
 @router.get("", response_model=List[ClinicalCasePublicOut])
-async def list_published_cases(
+def list_published_cases(
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
     station_type: Optional[str] = Query(None, description="Filtrer par type de station"),
@@ -63,7 +63,7 @@ async def list_published_cases(
 
 
 @router.get("/{case_id}", response_model=ClinicalCasePublicOut)
-async def get_case_public(
+def get_case_public(
     case_id: int,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),
@@ -100,7 +100,7 @@ async def get_case_public(
 
 
 @router.get("/{case_id}/instructions", response_model=dict)
-async def get_case_instructions(
+def get_case_instructions(
     case_id: int,
     session: Session = Depends(get_session),
     current_user: User = Depends(get_current_user),

@@ -35,6 +35,7 @@ from typing import List, Optional
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy import or_
 from sqlmodel import Session, select
@@ -47,8 +48,7 @@ from auth import check_authorization
 from case_sheet import CaseSheet, Issue, blocking, check_sheet, compile_case
 from db import get_session
 from models import (
-    Attachment, Attempts, CaseVersion, ChatRole, ClinicalCase, EDNItem, ItemSituationLink, Message,
-    StartingSituation, StationType, User, UserRole,
+    Attachment, Attempts, CaseVersion, ClinicalCase, EDNItem, ItemSituationLink, StartingSituation, StationType, User, UserRole,
 )
 
 router = APIRouter()
@@ -364,7 +364,7 @@ class AssistIn(BaseModel):
 @router.post("/cases/{case_id}/assist", response_model=authoring_assistant.Proposal)
 async def assist(case_id: int, payload: AssistIn, session: Session = Depends(get_session), user: User = Depends(teacher)):
     """Propositions à relire ; la fiche n'est pas modifiée (l'éditeur ajoute ce que l'enseignant accepte)."""
-    case = _own_case(session, case_id, user)
+    case = await run_in_threadpool(_own_case, session, case_id, user)
     sheet = payload.sheet or _sheet(case)
     if sheet is None:
         raise HTTPException(400, "Ce cas n'a pas de fiche.")
@@ -374,6 +374,45 @@ async def assist(case_id: int, payload: AssistIn, session: Session = Depends(get
         raise HTTPException(422, str(exc))
     except authoring_assistant.AssistantError as exc:
         raise HTTPException(502, str(exc))
+
+
+# ==================== TENTATIVES DES ÉTUDIANTS (relecture des corrections) ====================
+
+class CaseAttemptOut(BaseModel):
+    attempt_id: str
+    username: str
+    full_name: Optional[str] = None
+    is_test: bool
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    evaluated: bool
+    score_20: Optional[float] = None
+    reviewed: bool
+    needs_review: bool = False
+
+
+@router.get("/cases/{case_id}/attempts", response_model=List[CaseAttemptOut])
+def case_attempts(case_id: int, session: Session = Depends(get_session), user: User = Depends(teacher)):
+    """Tentatives d'une station (auteur ou administrateur), pour relire et corriger les notes."""
+    from models import EvaluationResult
+
+    case = _own_case(session, case_id, user)
+    rows = session.exec(select(Attempts, User).join(User, User.id == Attempts.user_id)
+                        .where(Attempts.case_id == case.id).order_by(Attempts.created_at.desc())).all()
+    evaluations = {e.attempt_id: e for e in session.exec(
+        select(EvaluationResult).where(EvaluationResult.case_id == case.id)).all()}
+    out = []
+    for attempt, student in rows:
+        ev = evaluations.get(attempt.id)
+        data = (ev.evaluation_data or {}).get("evaluation", {}) if ev else {}
+        out.append(CaseAttemptOut(
+            attempt_id=str(attempt.id), username=student.username, full_name=student.full_name,
+            is_test=bool(attempt.is_test),
+            started_at=attempt.created_at.isoformat() if attempt.created_at else None,
+            completed_at=attempt.completed_at.isoformat() if attempt.completed_at else None,
+            evaluated=ev is not None, score_20=data.get("score_20"),
+            reviewed=bool(data.get("reviewed_at")), needs_review=bool(data.get("needs_review"))))
+    return out
 
 
 # ==================== RELECTURE (facultative, ne bloque pas la publication) ====================
@@ -436,20 +475,19 @@ class DocumentOut(BaseModel):
 async def upload_document(case_id: int, file: UploadFile = File(...), label: str = Form(""),
                           session: Session = Depends(get_session), user: User = Depends(teacher)):
     """Fichier d'un document de la vignette ; la fiche le référence ensuite (station.documents)."""
-    import mimetypes
     from pathlib import Path
 
+    from attachment_routes import checked_upload
     from storage import storage
 
     case = _own_case(session, case_id, user)
     data = await file.read()
-    mime = file.content_type or mimetypes.guess_type(file.filename or "")[0] or ""
-    if mime not in DOCUMENT_TYPES:
-        raise HTTPException(415, "Formats acceptés : image (PNG, JPEG, WebP, GIF) ou PDF.")
+    # Type réel d'après le contenu ; l'extension stockée en découle (jamais celle du nom envoyé)
+    mime, _, ext = checked_upload(data, allowed=DOCUMENT_TYPES)
     if len(data) > MAX_DOCUMENT_BYTES:
         raise HTTPException(413, "Fichier trop volumineux (15 Mo maximum).")
-    name = Path(file.filename or "document").name
-    path = f"authoring/{case.id}/{uuid4().hex}{Path(name).suffix.lower()}"
+    name = Path(file.filename or "document").name[:255]
+    path = f"authoring/{case.id}/{uuid4().hex}{ext}"
     url = await storage.save_file(data, path)
     attachment = Attachment(case_id=case.id, filename=name, stored_filename=Path(path).name,
                             display_name=label.strip() or name, description=label.strip() or None,

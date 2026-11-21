@@ -220,7 +220,7 @@ async def classify_with_llm(
 ) -> Tuple[ArbiterLLMOutput, Optional[int]]:
     """Un appel LLM, sans cache ni préfiltre. Retourne (sortie, tokens générés)."""
     model = model or _arbiter_model()
-    client = client or get_arbiter_client(os.getenv("VLLM_ARBITER_BASE_URL", "http://10.33.35.222:8002/v1"))
+    client = client or get_arbiter_client(os.getenv("VLLM_ARBITER_BASE_URL", "http://localhost:8002/v1"))
     kwargs = dict(
         model=model,
         messages=[

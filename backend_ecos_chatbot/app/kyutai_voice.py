@@ -36,6 +36,9 @@ logger = logging.getLogger(__name__)
 
 SAMPLE_RATE = 24000
 FRAME_SIZE = 1920  # 80 ms
+# Audio en attente d'envoi au STT (trames du navigateur) : au-delà, le serveur ne suit plus
+# (ou un client envoie trop) ; on jette l'audio plutôt que de remplir la mémoire.
+MAX_QUEUED_AUDIO = 500
 STT_PATH = "/api/asr-streaming"
 TTS_PATH = "/api/tts_streaming"
 
@@ -202,7 +205,7 @@ class STTSession:
         self._task = asyncio.create_task(self._run())
 
     def push_audio(self, samples: List[float]) -> None:
-        if samples:
+        if samples and self._queue.qsize() < MAX_QUEUED_AUDIO:
             self._queue.put_nowait(("audio", samples))
 
     async def finish(self, timeout: float = 8.0) -> str:
@@ -330,7 +333,7 @@ class STTStream:
             raise VoiceServiceError(f"STT : {self.error or 'pas de connexion'}")
 
     def push_audio(self, samples: List[float]) -> None:
-        if samples and not self.closed.is_set():
+        if samples and not self.closed.is_set() and self._queue.qsize() < MAX_QUEUED_AUDIO:
             self._queue.put_nowait(("audio", samples))
 
     def flush(self, marker_id: int) -> None:

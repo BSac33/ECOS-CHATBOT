@@ -171,9 +171,9 @@ async def test_attempt_keeps_the_version_it_played(client, session, monkeypatch)
     captured = {}
 
     def fake_eval(transcript, evaluation_grid, case_context):
+        from tests.conftest import complete_evaluation
         captured["grid"] = evaluation_grid
-        return {"evaluation": {"items": [], "total_score": 0.0, "total_possible": 20.0,
-                               "percentage": 0.0, "general_feedback": ""}}
+        return complete_evaluation(evaluation_grid)
     monkeypatch.setattr(evaluation_routes, "evaluate_attempt_with_llm", fake_eval)
 
     client.as_user("etu")
@@ -353,13 +353,23 @@ async def test_upload_vignette_document(client, session, monkeypatch, tmp_path):
     monkeypatch.setattr(storage_module.storage, "save_file", fake_save)
 
     case_id = await _new_case(client, dupont_sheet())
+    png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
     r = await client.post(f"/authoring/cases/{case_id}/documents", data={"label": "Document 1 : ECG"},
-                          files={"file": ("ecg.png", b"\x89PNG...", "image/png")})
+                          files={"file": ("ecg.png", png, "image/png")})
     assert r.status_code == 200, r.text
     att = session.get(Attachment, __import__("uuid").UUID(r.json()["attachment_id"]))
-    assert att.case_id == case_id and att.display_name == "Document 1 : ECG" and list(saved.values()) == [b"\x89PNG..."]
+    assert att.case_id == case_id and att.display_name == "Document 1 : ECG" and list(saved.values()) == [png]
+    assert att.mime_type == "image/png" and att.file_path.endswith(".png")
     r = await client.post(f"/authoring/cases/{case_id}/documents", files={"file": ("x.exe", b"MZ", "application/x-msdownload")})
     assert r.status_code == 415
+    # Page HTML déclarée comme image : refusée (le type vient du contenu, pas de l'en-tête ni du nom)
+    r = await client.post(f"/authoring/cases/{case_id}/documents",
+                          files={"file": ("x.html", b"<script>alert(1)</script>", "image/png")})
+    assert r.status_code == 415
+    # Vrai PNG nommé .html : accepté mais stocké en .png
+    r = await client.post(f"/authoring/cases/{case_id}/documents", files={"file": ("piege.html", png, "text/html")})
+    assert r.status_code == 200
+    assert session.get(Attachment, __import__("uuid").UUID(r.json()["attachment_id"])).file_path.endswith(".png")
     client.as_user("autre_prof")
     r = await client.post(f"/authoring/cases/{case_id}/documents", files={"file": ("ecg.png", b"x", "image/png")})
     assert r.status_code == 403

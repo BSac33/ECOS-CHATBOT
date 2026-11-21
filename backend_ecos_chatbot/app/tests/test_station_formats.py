@@ -160,7 +160,8 @@ def test_silent_station_evaluation(session, silent_world, monkeypatch):
 
     def fake_llm(transcript, evaluation_grid, case_context):
         seen.update(transcript=transcript, grid=evaluation_grid)
-        return {"evaluation": {"items": [{"item_id": "i2", "points_awarded": 1, "justification": "« normal »"}],
+        return {"evaluation": {"items": [{"item_id": "i1", "points_awarded": 0, "citation": "", "justification": "absent"},
+                                         {"item_id": "i2", "points_awarded": 1, "justification": "« normal »"}],
                                "scales": [{"scale_id": "synthese", "level": 2, "justification": "ok"}],
                                "global_performance": {"level": 2, "justification": "ok"},
                                "general_feedback": "ok"}}

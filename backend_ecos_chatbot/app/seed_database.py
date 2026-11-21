@@ -9,13 +9,12 @@ Usage:
 
 import os
 import sys
-from datetime import datetime
 from sqlmodel import Session, create_engine, select
 # Ajouter le répertoire parent au path pour les imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models import (
-    User, ClinicalCase, StationType, EvaluationGrid, CaseVersion, CorpusChunk,
+    User, ClinicalCase, EvaluationGrid, CaseVersion, CorpusChunk,
     EDNItem, DisciplineItem, Discipline,
     CaseEdnLink, CaseDisciplineLink, EdnDisciplineLink, UserRole
 )
@@ -25,7 +24,7 @@ from case_examples import dupont_sheet
 def get_engine():
     """Récupère l'engine de base de données"""
     database_url = os.getenv("DATABASE_URL", "postgresql://ecos_chatbot:ecos_password@localhost:5432/ecos_chatbot_db")
-    return create_engine(database_url, echo=True)
+    return create_engine(database_url)
 
 
 def clear_database(session: Session):
@@ -154,6 +153,15 @@ def main():
     engine = get_engine()
     
     with Session(engine) as session:
+        # Garde-fou : le seed efface les cas, tentatives et corrections. Sur une base en service,
+        # utiliser scripts/import_stations.py (idempotent, n'efface rien).
+        from models import Attempts
+        existing = session.exec(select(Attempts.id).where(Attempts.is_test == False)).first()  # noqa: E712
+        if existing is not None and "--force" not in sys.argv:
+            print("⛔ La base contient déjà des tentatives d'étudiants : le seed les effacerait.\n"
+                  "   Pour ajouter des stations sans rien effacer : python scripts/import_stations.py\n"
+                  "   Pour tout effacer quand même : python seed_database.py --force")
+            sys.exit(1)
         # Nettoyage
         clear_database(session)
 
@@ -171,7 +179,7 @@ def main():
         print("\n" + "="*60)
         print("✅ SEED TERMINÉ AVEC SUCCÈS!")
         print("="*60)
-        print(f"\n📊 Résumé:")
+        print("\n📊 Résumé:")
         print(f" - Disciplines créées : {len(disciplines)}")
         print(f" - Items EDN créés : {len(edn_items)}")
         print(f" - Cas cliniques créés : 1 (+ {imported} station(s) de packs privés)")

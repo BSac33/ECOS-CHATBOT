@@ -6,7 +6,7 @@ from types import SimpleNamespace
 
 # Variables lues à l'import des modules de l'app
 os.environ.setdefault("DATABASE_URL", "sqlite://")
-os.environ.setdefault("SECRET_KEY", "test-secret")
+os.environ.setdefault("SECRET_KEY", "test-secret-" + "0" * 32)
 
 # Les modules de l'app s'importent à plat (from models import ...)
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -139,3 +139,19 @@ class FakeAsyncClient:
         if kwargs.get("stream"):
             return as_stream(response, self._chunk_size)
         return response
+
+
+# ---------- Correction factice complète (tous les items et échelles de la grille) ----------
+
+def complete_evaluation(grid, points=None, levels=None, citation="", feedback="ok"):
+    """Sortie de LLM complète pour `grid` : points[item_id] (défaut 0), levels[scale_id] (défaut 2)."""
+    points, levels = points or {}, levels or {}
+    items = [{"item_id": str(i["id"]), "points_awarded": points.get(str(i["id"]), 0),
+              "citation": citation if points.get(str(i["id"])) else "", "justification": "ok"}
+             for i in grid.get("items", [])]
+    out = {"items": items, "general_feedback": feedback}
+    scales = [s for s in grid.get("scales") or [] if s.get("observable", True)]
+    if scales or grid.get("global_rating"):
+        out["scales"] = [{"scale_id": s["id"], "level": levels.get(s["id"], 2), "justification": "ok"} for s in scales]
+        out["global_performance"] = {"level": 2, "justification": "ok"}
+    return {"evaluation": out}

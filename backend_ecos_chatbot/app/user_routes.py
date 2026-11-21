@@ -3,17 +3,17 @@ Routes pour gérer les données utilisateur et statistiques.
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlmodel import Session, select, func
-from datetime import datetime
 from typing import Optional, List, Annotated
 from uuid import UUID
 
 from db import get_session
 from models import (
-    User, Attempts, ClinicalCase, Message, EvaluationGrid,
-    StationType, ChatRole, UserOut
+    User, Attempts, ClinicalCase, Message, StationType, UserOut
 )
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from auth import check_authorization, get_current_user
+from auth import check_authorization, verify_password
+from user_data import UserDeletionRefused, delete_attempt, delete_user, export_user
 
 
 router = APIRouter()
@@ -49,7 +49,7 @@ class UserAttemptsResponse(BaseModel):
     stats: UserStats
 
 @router.get("/me", response_model=UserOut)
-async def get_current_user_info(
+def get_current_user_info(
     user: Annotated[User, Depends(check_authorization())]
     
 ) -> UserOut:
@@ -204,7 +204,7 @@ def get_user_attempt_detail(
     result = session.exec(stmt).first()
     
     if not result:
-        raise HTTPException(404, "Attempt not found or access denied")
+        raise HTTPException(404, "Tentative introuvable")
     
     attempt, case_title, station_type_val, msg_count = result
     
@@ -231,31 +231,39 @@ def delete_user_attempt(
     attempt_id: UUID,
     session: Session = Depends(get_session),
 ):
-    """
-    Supprime une tentative de l'utilisateur.
-    Supprime également tous les messages associés (cascade).
-    """
-    user_id = user.id
-
+    """Supprime une tentative de l'utilisateur et tout ce qui en dépend (messages,
+    correction, signalements)."""
     attempt = session.get(Attempts, attempt_id)
-    
-    if not attempt:
-        raise HTTPException(404, "Attempt not found")
-    
-    if attempt.user_id != user_id:
-        raise HTTPException(403, "Access denied")
-    
-    # Supprimer les messages associés
-    msg_stmt = select(Message).where(Message.attempt_id == attempt_id)
-    messages = session.exec(msg_stmt).all()
-    for msg in messages:
-        session.delete(msg)
-    
-    # Supprimer l'attempt
-    session.delete(attempt)
+    if not attempt or attempt.user_id != user.id:
+        raise HTTPException(404, "Tentative introuvable")
+    delete_attempt(session, attempt_id)
     session.commit()
-    
-    return {"message": "Attempt deleted successfully", "id": str(attempt_id)}
+    return {"message": "Tentative supprimée.", "id": str(attempt_id)}
+
+
+class DeleteAccountIn(BaseModel):
+    password: str
+
+
+@router.get("/me/export")
+def export_my_data(user: Annotated[User, Depends(check_authorization())], session: Session = Depends(get_session)):
+    """Toutes mes données (compte, tentatives, messages, corrections), en JSON."""
+    return JSONResponse(export_user(session, user),
+                        headers={"Content-Disposition": 'attachment; filename="mes-donnees-ecos.json"'})
+
+
+@router.delete("/me", status_code=204)
+def delete_my_account(payload: DeleteAccountIn, user: Annotated[User, Depends(check_authorization())],
+                      session: Session = Depends(get_session)):
+    """Suppression définitive du compte et de toutes ses données (mot de passe demandé)."""
+    if not verify_password(payload.password, user.hashed_password):
+        raise HTTPException(403, "Mot de passe incorrect.")
+    try:
+        delete_user(session, user)
+    except UserDeletionRefused as exc:
+        session.rollback()
+        raise HTTPException(409, str(exc))
+    session.commit()
 
 
 @router.get("/me/stats", response_model=UserStats)

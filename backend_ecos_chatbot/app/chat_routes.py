@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
-from httpx import get
 from sqlmodel import Session, select
 from datetime import datetime, timedelta
 from uuid import UUID
@@ -9,9 +9,8 @@ from typing import Any, AsyncIterator, Callable, ContextManager, Optional
 from db import engine, get_session
 import json
 import os
-from models import Attachment, CaseVersion, ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, ExaminerNoteOut, ModerationEvent, StationType, User, UserRole
-from ai_chat_utils import generate_patient_reply
-from vllm_chat_utils import get_chat_completion_vllm
+from models import Attachment, CaseVersion, ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, ExaminerNoteOut, ModerationEvent, StationType, User
+from vllm_chat_utils import generate_patient_reply_vllm as generate_patient_reply
 from arbiter import Verdict, arbitrate, prefilter
 from patient_agent import AgentEvent, CaseToolContext, DocumentRef, PatientAgentResult, StreamItem, stream_patient_agent
 from attachment_routes import find_matching_attachments
@@ -22,19 +21,11 @@ import asyncio
 from auth import check_authorization 
 
 logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-
-# Configurer le handler pour afficher les logs dans la console
-handler = logging.StreamHandler()
-handler.setLevel(logging.INFO)
-formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-handler.setFormatter(formatter)
-logger.addHandler(handler)
 
 router = APIRouter()
 
 @router.get("/cases/{case_id}/active-attempt", response_model=AttemptOut | None)
-async def get_active_attempt(case_id: int, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
+def get_active_attempt(case_id: int, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
     """
     Récupère l'attempt actif (non complété et non expiré) pour un cas et un utilisateur donné.
     Retourne None s'il n'y en a pas.
@@ -51,7 +42,7 @@ async def get_active_attempt(case_id: int, session: Session = Depends(get_sessio
     attempt = session.exec(stmt).first()
     
     if not attempt:
-        logger.info(f"❌ Aucun attempt actif trouvé")
+        logger.info("❌ Aucun attempt actif trouvé")
         return None
     
     # Vérifier si l'attempt n'est pas expiré
@@ -74,7 +65,7 @@ async def get_active_attempt(case_id: int, session: Session = Depends(get_sessio
     )
 
 @router.post("/attempts", response_model=AttemptOut)
-async def create_attempt(
+def create_attempt(
     payload: AttemptCreateIn, 
     session: Session = Depends(get_session), 
     user: User = Depends(check_authorization())):
@@ -83,10 +74,12 @@ async def create_attempt(
     case = session.get(ClinicalCase, payload.case_id)
     
     if not case:
-        raise HTTPException(404, "Clinical case not found")
-    # Un brouillon n'est jouable que par les enseignants (test : /authoring/cases/{id}/test)
-    if case.status != "published" and user.role == UserRole.student:
-        raise HTTPException(404, "Clinical case not found")
+        raise HTTPException(404, "Station introuvable")
+    # Une station se joue dans sa dernière version publiée ; un brouillon se teste depuis
+    # l'atelier (POST /authoring/cases/{id}/test), en tentative de test exclue des statistiques
+    version = latest_published_version(session, case.id)
+    if version is None and (case.status != "published" or case.sheet is not None):
+        raise HTTPException(404, "Station introuvable ou pas encore publiée (testez-la depuis l'atelier)")
     
     logger.info(f"⏱️ Durée du cas: {case.duration_seconds} secondes")
     logger.info(f"case found: {case.title}")
@@ -94,7 +87,6 @@ async def create_attempt(
     attempt = Attempts(user_id=user.id, case_id=payload.case_id, created_at=datetime.utcnow(), is_completed=False)
 
     # Version publiée en vigueur : c'est elle qui sera jouée et corrigée
-    version = latest_published_version(session, case.id)
     attempt.case_version_id = version.id if version else None
     duration = version.duration_seconds if version else case.duration_seconds
     
@@ -120,7 +112,7 @@ async def create_attempt(
 def get_messages(attempt_id: UUID, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
     attempt = session.get(Attempts, attempt_id)
     if not attempt or attempt.user_id != user.id:
-        raise HTTPException(404, "Attempt not found")
+        raise HTTPException(404, "Tentative introuvable")
 
     stmt = select(Message).where(Message.attempt_id == attempt_id).order_by(Message.created_at)
     msgs = session.exec(stmt).all()
@@ -169,11 +161,11 @@ def get_case_info(attempt_id: UUID, session: Session = Depends(get_session), use
     """Récupère les informations du cas clinique associé à un attempt"""
     attempt = session.get(Attempts, attempt_id)
     if not attempt or attempt.user_id != user.id:
-        raise HTTPException(404, "Attempt not found")
+        raise HTTPException(404, "Tentative introuvable")
     
     case = session.get(ClinicalCase, attempt.case_id)
     if not case:
-        raise HTTPException(500, "Case not found")
+        raise HTTPException(404, "Station introuvable")
     
     version = attempt_version(session, attempt)
     info = case_publishing.runtime(version) or {}
@@ -199,7 +191,7 @@ def get_time_remaining(
     """Récupère le temps restant pour une tentative"""
     attempt = session.get(Attempts, attempt_id)
     if not attempt or attempt.user_id != user.id:
-        raise HTTPException(404, "Attempt not found")
+        raise HTTPException(404, "Tentative introuvable")
 
     if attempt.is_completed:
         return {
@@ -249,10 +241,8 @@ PATIENT_ERROR_MESSAGE = "Le patient simulé n'a pas pu répondre. Réessayez dan
 
 
 def _use_patient_agent() -> bool:
-    """Agent avec outils si le patient est servi par vLLM (désactivable)."""
-    provider = os.getenv("LLM_PROVIDER", "gemini").lower()
-    enabled = os.getenv("PATIENT_AGENT_ENABLED", "true").lower() in ("1", "true", "yes")
-    return provider == "vllm" and enabled
+    """Agent avec outils (défaut) ; PATIENT_AGENT_ENABLED=false : patient sans outils."""
+    return os.getenv("PATIENT_AGENT_ENABLED", "true").lower() in ("1", "true", "yes")
 
 
 def _blocked_notice(verdict: Verdict) -> str:
@@ -323,17 +313,26 @@ class _Turn:
 
 
 def _prepare_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: User, modality: str = "text") -> _Turn:
-    """Validations (erreurs HTTP classiques, avant tout flux) et lecture du contexte."""
+    """Validations (erreurs HTTP classiques, avant tout flux) et lecture du contexte.
+    La transaction de lecture est close au retour : aucune connexion à la base n'est tenue
+    pendant l'appel au modèle (qui peut durer plusieurs secondes)."""
+    try:
+        return _read_turn(attempt_id, payload, session, user, modality)
+    finally:
+        session.rollback()
+
+
+def _read_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: User, modality: str) -> _Turn:
     attempt = session.get(Attempts, attempt_id)
     
     if not attempt or attempt.user_id != user.id:
-        raise HTTPException(404, "Attempt not found")
+        raise HTTPException(404, "Tentative introuvable")
     if attempt.is_completed:
-        raise HTTPException(400, "Attempt already completed")
+        raise HTTPException(409, "Cette station est terminée.")
 
     case = session.get(ClinicalCase, attempt.case_id)
     if not case:
-        raise HTTPException(500, "Case missing (DB integrity error)")
+        raise HTTPException(404, "Station introuvable")
 
     # Vérifier si le temps est écoulé
     now = datetime.utcnow()
@@ -345,7 +344,7 @@ def _prepare_turn(attempt_id: UUID, payload: ChatIn, session: Session, user: Use
         session.commit()
         
         raise HTTPException(
-            408,  # Request Timeout
+            410,  # temps écoulé : la tentative n'accepte plus de message (408 serait rejoué par certains clients)
             f"Le temps imparti ({case.duration_seconds // 60} minutes) est écoulé. "
             "La session a été automatiquement finalisée. "
             "Vous pouvez maintenant procéder à l'évaluation."
@@ -430,7 +429,7 @@ def _patient_stream(turn: _Turn) -> AsyncIterator[StreamItem]:
 
 
 async def _legacy_stream(turn: _Turn) -> AsyncIterator[StreamItem]:
-    """Ancien fonctionnement (Gemini ou agent désactivé) : pas d'outils, pas de flux
+    """Agent désactivé : pas d'outils, pas de flux
     token par token, documents détectés par mots-clés."""
     reply = await asyncio.to_thread(
         generate_patient_reply,
@@ -548,6 +547,19 @@ def _persist_exchange(session: Session, turn: _Turn, result: PatientAgentResult,
     )
 
 
+def _in_session(write_session: Callable[[], ContextManager[Session]], fn: Callable, *args: Any) -> Any:
+    """Exécute fn(session, *args) dans une session d'écriture (appelé dans un thread)."""
+    with write_session() as s:
+        return fn(s, *args)
+
+
+def _persist_silent(write_session: Callable[[], ContextManager[Session]], turn: _Turn) -> None:
+    with write_session() as s:
+        s.add(Message(attempt_id=turn.attempt_id, role=ChatRole.student, content=turn.message,
+                      modality=turn.modality, created_at=datetime.now()))
+        s.commit()
+
+
 async def _run_turn(turn: _Turn, write_session: Callable[[], ContextManager[Session]]) -> AsyncIterator[tuple[str, Any]]:
     """Orchestre un tour. Produit, dans l'ordre :
         ("delta", str)                      texte du patient (seulement après validation)
@@ -557,10 +569,7 @@ async def _run_turn(turn: _Turn, write_session: Callable[[], ContextManager[Sess
     """
     if turn.silent:
         # Station sans interlocuteur : seule la parole de l'étudiant est enregistrée
-        with write_session() as s:
-            s.add(Message(attempt_id=turn.attempt_id, role=ChatRole.student, content=turn.message,
-                          modality=turn.modality, created_at=datetime.now()))
-            s.commit()
+        await asyncio.to_thread(_persist_silent, write_session, turn)
         yield ("done", ChatOut(patient_reply="", silent=True))
         return
 
@@ -568,8 +577,7 @@ async def _run_turn(turn: _Turn, write_session: Callable[[], ContextManager[Sess
     # sans appel LLM et sans même lancer la génération du patient.
     verdict = prefilter(turn.message)
     if verdict is not None:
-        with write_session() as s:
-            _persist_blocked(s, turn, verdict)
+        await asyncio.to_thread(_in_session, write_session, _persist_blocked, turn, verdict)
         logger.info("⛔ Message bloqué par le préfiltre (%s) : %s", verdict.category, verdict.detail)
         yield ("done", ChatOut(patient_reply=_blocked_notice(verdict), blocked=True))
         return
@@ -597,8 +605,7 @@ async def _run_turn(turn: _Turn, write_session: Callable[[], ContextManager[Sess
         if not verdict.allowed:
             patient_task.cancel()
             await asyncio.wait([patient_task])
-            with write_session() as s:
-                _persist_blocked(s, turn, verdict)
+            await asyncio.to_thread(_in_session, write_session, _persist_blocked, turn, verdict)
             yield ("done", ChatOut(patient_reply=_blocked_notice(verdict), blocked=True))
             return
 
@@ -614,9 +621,9 @@ async def _run_turn(turn: _Turn, write_session: Callable[[], ContextManager[Sess
                 yield ("error", (502, PATIENT_ERROR_MESSAGE))
                 return
             elif kind == "done":
-                logger.info("Réponse patient générée: %s (outils: %s)", value.reply, value.tool_calls)
-                with write_session() as s:
-                    out = _persist_exchange(s, turn, value, verdict)
+                logger.debug("Réponse patient générée (%d caractères, outils : %s)", len(value.reply),
+                             [c["name"] for c in value.tool_calls])
+                out = await asyncio.to_thread(_in_session, write_session, _persist_exchange, turn, value, verdict)
                 yield ("done", out)
                 return
     finally:
@@ -632,7 +639,7 @@ async def chat(
     session: Session = Depends(get_session), 
     user: User = Depends(check_authorization())):
     """Tour de chat, réponse JSON complète."""
-    turn = _prepare_turn(attempt_id, payload, session, user)
+    turn = await run_in_threadpool(_prepare_turn, attempt_id, payload, session, user)
     async with aclosing(_run_turn(turn, lambda: nullcontext(session))) as events:
         async for kind, value in events:
             if kind == "error":
@@ -661,10 +668,10 @@ async def chat_stream(
       done           ChatOut                       fin du tour (blocked=true si refusé)
       error          {"status": 502, "message": ""} échec, rien n'est enregistré
 
-    Les erreurs de validation (404, 400, 408...) restent des réponses HTTP classiques.
+    Les erreurs de validation (404, 409, 410...) restent des réponses HTTP classiques.
     Si le client se déconnecte avant "done", la génération est annulée et rien n'est enregistré.
     """
-    turn = _prepare_turn(attempt_id, payload, session, user)
+    turn = await run_in_threadpool(_prepare_turn, attempt_id, payload, session, user)
 
     async def event_source():
         async with aclosing(_run_turn(turn, _write_session)) as events:
@@ -690,7 +697,7 @@ async def chat_stream(
 def finalize_attempt(attempt_id: UUID, session: Session = Depends(get_session), user: User = Depends(check_authorization())):
     attempt = session.get(Attempts, attempt_id)
     if not attempt or attempt.user_id != user.id:
-        raise HTTPException(404, "Attempt not found")
+        raise HTTPException(404, "Tentative introuvable")
 
     attempt.is_completed = True
     attempt.completed_at = datetime.utcnow()  # Enregistrer le timestamp de finalisation
@@ -698,11 +705,3 @@ def finalize_attempt(attempt_id: UUID, session: Session = Depends(get_session), 
     session.commit()
 
     return {"status": "ok", "completed_at": attempt.completed_at.isoformat()}
-
-@router.post("test-chat")
-def test_chat():
-    response = get_chat_completion_vllm()
-    if response:
-        return response
-    else:   
-        raise HTTPException(500, "Erreur lors de l'appel à vLLM")

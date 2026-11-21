@@ -61,7 +61,7 @@ from kyutai_voice import (
     SAMPLE_RATE, STTSession, STTStream, TTSSession, VoiceServiceError, WordChunker,
     default_voice, pcm_from_bytes, pcm_to_bytes, prepare_text_for_tts,
 )
-from models import Attempts, ChatIn, ClinicalCase, Message, User
+from models import Attempts, ChatIn, ClinicalCase, Message, User, MAX_CHAT_MESSAGE_CHARS
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,7 @@ PAUSE_WARMUP_STEPS = 12        # premières prédictions instables, ignorées
 ENDPOINT_FALLBACK_STEPS = 25   # 2 s sans nouveau mot : fin de phrase forcée
 BARGE_IN_MIN_WORDS = 2         # mots (hors écho) nécessaires pour couper la parole au patient
 ECHO_TAIL_SEC = 1.5            # le micro peut encore entendre la fin de la voix (délai STT ~0,5 s)
+MAX_AUDIO_FRAME_BYTES = 256 * 1024  # ~2,7 s de float32 à 24 kHz : au-delà, trame ignorée
 
 
 # Marge de démarrage de la lecture côté navigateur (voir services/voice.ts)
@@ -114,11 +115,44 @@ async def _authenticate(websocket: WebSocket) -> Optional[User]:
             token = authorization[7:]
     if not token:
         return None
+    return await asyncio.to_thread(_user_from_token, token)
+
+
+def _user_from_token(token: str) -> Optional[User]:
     with chat_routes._write_session() as session:
         try:
-            return await get_current_user(session=session, token=token)
+            return get_current_user(session=session, token=token)
         except HTTPException:
             return None
+
+
+def _prepare_voice_turn(attempt_id: UUID, transcript: str, user: User):
+    with chat_routes._write_session() as session:
+        return chat_routes._prepare_turn(attempt_id, ChatIn(message=transcript[:MAX_CHAT_MESSAGE_CHARS]),
+                                         session, user, modality="voice")
+
+
+def _save_interruption(message_id: str, reason: str, spoken: str) -> bool:
+    with chat_routes._write_session() as session:
+        message = session.get(Message, UUID(message_id))
+        if message is None:
+            return False
+        message.interrupted_by = reason
+        message.spoken_content = spoken
+        session.add(message)
+        session.commit()
+        return True
+
+
+def _voice_for_attempt(attempt_id: UUID, user: User) -> Optional[str]:
+    """Voix du patient, ou None si la tentative n'appartient pas à l'utilisateur."""
+    with chat_routes._write_session() as session:
+        attempt = session.get(Attempts, attempt_id)
+        if not attempt or attempt.user_id != user.id:
+            return None
+        case = session.get(ClinicalCase, attempt.case_id)
+        version = chat_routes.attempt_version(session, attempt)
+        return (version.voice_id if version else (case.voice_id if case else None)) or default_voice()
 
 
 # ==================== CONVERSATION ====================
@@ -174,6 +208,8 @@ class VoiceConversation:
                 if message["type"] == "websocket.disconnect":
                     break
                 if message.get("bytes") is not None:
+                    if len(message["bytes"]) > MAX_AUDIO_FRAME_BYTES:
+                        continue
                     if self.stream is not None:
                         self.stream.push_audio(pcm_from_bytes(message["bytes"]))
                     elif self.stt is not None:
@@ -281,14 +317,8 @@ class VoiceConversation:
         if len(heard) >= len(speaker.final_words):
             return  # chevauchement sur le dernier mot : le patient avait fini
         spoken = (" ".join(heard) + " …").strip()
-        with chat_routes._write_session() as session:
-            message = session.get(Message, UUID(speaker.message_id))
-            if message is None:
-                return
-            message.interrupted_by = info["reason"]
-            message.spoken_content = spoken
-            session.add(message)
-            session.commit()
+        if not await asyncio.to_thread(_save_interruption, speaker.message_id, info["reason"], spoken):
+            return
         logger.info("✂️ Patient coupé (%s) après %d/%d mots", info["reason"], len(heard), len(speaker.final_words))
         await self.send_json({"type": "patient_interrupted", "message_id": speaker.message_id,
                               "reason": info["reason"], "spoken_content": spoken})
@@ -421,13 +451,13 @@ class VoiceConversation:
         if previous is not None and not previous.done():
             await asyncio.wait([previous])
 
-        with chat_routes._write_session() as session:
-            try:
-                turn = chat_routes._prepare_turn(self.attempt_id, ChatIn(message=transcript),
-                                                 session, self.user, modality="voice")
-            except HTTPException as e:
-                await self.send_json({"type": "error", "status": e.status_code, "message": e.detail})
-                return
+        if not transcript.strip():
+            return
+        try:
+            turn = await asyncio.to_thread(_prepare_voice_turn, self.attempt_id, transcript, self.user)
+        except HTTPException as e:
+            await self.send_json({"type": "error", "status": e.status_code, "message": e.detail})
+            return
 
         speaker = _Speaker(self, self.voice)
         self.speaker = speaker
@@ -593,14 +623,10 @@ async def voice(websocket: WebSocket, attempt_id: UUID):
     if user is None:
         await websocket.close(code=1008, reason="Non authentifié")
         return
-    with chat_routes._write_session() as session:
-        attempt = session.get(Attempts, attempt_id)
-        if not attempt or attempt.user_id != user.id:
-            await websocket.close(code=1008, reason="Tentative introuvable")
-            return
-        case = session.get(ClinicalCase, attempt.case_id)
-        version = chat_routes.attempt_version(session, attempt)
-        voice_id = (version.voice_id if version else (case.voice_id if case else None)) or default_voice()
+    voice_id = await asyncio.to_thread(_voice_for_attempt, attempt_id, user)
+    if voice_id is None:
+        await websocket.close(code=1008, reason="Tentative introuvable")
+        return
 
     await websocket.accept()
     await VoiceConversation(websocket, attempt_id, user, voice_id).run()

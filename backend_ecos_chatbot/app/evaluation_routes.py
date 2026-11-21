@@ -5,28 +5,30 @@ L'évaluateur ne parle JAMAIS avec l'étudiant pendant l'examen.
 L'évaluation se fait après la fin de la station en analysant le transcript complet.
 """
 
-from typing import Annotated, Optional
-from fastapi import APIRouter, Depends, HTTPException
-from sqlmodel import Session, select
-from uuid import UUID
+import copy
+import logging
 from datetime import datetime
-from db import get_session
-from models import (
-    CaseVersion,
-    ClinicalCase, 
-    Attempts, 
-    Message, 
-    EvaluationGrid,
-    EvaluationOut,
-    EvaluationResult,
-    EvaluationItemResult,
-    StationType
-)
+from typing import Annotated, Optional
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
+from sqlmodel import Session, select
+
 import case_publishing
-from ai_chat_utils import evaluate_attempt_with_llm
-from scoring import score_evaluation
 from auth import check_authorization
-from models import UserRole, User
+from db import get_session
+from evaluation_service import (
+    UNAVAILABLE_MESSAGE, EvaluationUnavailable, evaluate_attempt_with_llm, missing_parts, silent_evaluation,
+)
+from models import (
+    Attempts, CaseVersion, ChatRole, ClinicalCase, EvaluationGrid, EvaluationItemResult, EvaluationOut,
+    EvaluationResult, Message, User, UserRole,
+)
+from scoring import recompute_totals, score_evaluation
+
+logger = logging.getLogger(__name__)
 
 
 router = APIRouter()
@@ -81,168 +83,210 @@ def build_evaluation_transcript(messages: list, no_interlocutor: bool = False,
     return transcript, interruptions
 
 
-@router.post("/attempts/{attempt_id}/evaluate", response_model=EvaluationOut)
-def evaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_session)], user: Annotated[User, Depends(check_authorization(UserRole.student))]):
-    """
-    Évalue une tentative ECOS en analysant le transcript complet.
-    
-    Cette route doit être appelée APRÈS la finalisation de la tentative.
-    L'évaluateur ne parle pas avec l'étudiant : il analyse silencieusement
-    le transcript et remplit la grille d'évaluation.
-    
-    Pour les stations avec patient (patient_interview, diagnosis_announcement, mixed):
-        - Analyse le transcript complet de la conversation étudiant-patient
-        
-    Pour les stations sans patient (exam_analysis, procedure):
-        - Analyse la réponse écrite de l'étudiant
-    
-    Retourne un JSON structuré avec:
-        - Les points attribués pour chaque item de la grille
-        - La justification avec citations du transcript
-        - Le score total et le feedback général
-    """
-    
-    user_id = user.id
-    
-    # Vérifier que la tentative existe et appartient à l'utilisateur
-    attempt = session.get(Attempts, attempt_id)
-    if not attempt or attempt.user_id != user_id:
-        raise HTTPException(404, "Tentative non trouvée")
-    
-    if not attempt.is_completed:
-        raise HTTPException(
-            400, 
-            "La tentative doit être finalisée avant l'évaluation. "
-            "Appelez d'abord POST /attempts/{attempt_id}/finalize"
-        )
-    
-    # Vérifier si une évaluation existe déjà pour cette tentative
-    existing_eval_stmt = select(EvaluationResult).where(
-        EvaluationResult.attempt_id == attempt_id
-    )
-    existing_eval = session.exec(existing_eval_stmt).first()
-    
-    if existing_eval:
-        # Retourner l'évaluation existante directement sans recalcul
-        return existing_eval.evaluation_data
-    
-    # Récupérer le cas clinique
-    case = session.get(ClinicalCase, attempt.case_id)
-    if not case:
-        raise HTTPException(500, "Cas clinique introuvable (erreur d'intégrité)")
-    
-    # Grille et contexte : ceux de la version du cas qui a été jouée (une
-    # republication ne change pas la correction d'une tentative passée)
+# ==================== CORRECTION ====================
+
+def _grid_and_context(session: Session, attempt: Attempts, case: ClinicalCase) -> tuple[dict, str, dict]:
+    """Grille et contexte de la version du cas qui a été jouée (une republication ne change
+    pas la correction d'une tentative passée)."""
     version = session.get(CaseVersion, attempt.case_version_id) if attempt.case_version_id else None
     info = case_publishing.runtime(version) or {}
     if version is not None:
-        grid_structure = {"items": version.grid_items, "version": float(version.version),
-                          "total_points": version.total_points,
-                          # Échelles d'attitude et évaluation globale (format des ECOS nationaux)
-                          "scales": info.get("scales") or [],
-                          "global_rating": bool(info.get("global_rating")),
-                          "attitude_weight": info.get("attitude_weight", 0.25)}
+        grid = {"items": version.grid_items, "version": float(version.version),
+                "total_points": version.total_points,
+                # Échelles d'attitude et évaluation globale (format des ECOS nationaux)
+                "scales": info.get("scales") or [],
+                "global_rating": bool(info.get("global_rating")),
+                "attitude_weight": info.get("attitude_weight", 0.25)}
         title, instructions, scenario = version.title, version.student_instructions, version.scenario_context
     else:
-        eval_grid_stmt = select(EvaluationGrid).where(
-            EvaluationGrid.case_id == case.id,
-            EvaluationGrid.is_active == True
-        )
-        eval_grid = session.exec(eval_grid_stmt).first()
-        
+        eval_grid = session.exec(select(EvaluationGrid).where(
+            EvaluationGrid.case_id == case.id, EvaluationGrid.is_active == True)).first()  # noqa: E712
         if not eval_grid:
-            raise HTTPException(
-                404, 
-                f"Aucune grille d'évaluation active pour le cas '{case.title}'"
-            )
-        grid_structure = {"items": eval_grid.items, "version": eval_grid.version,
-                          "total_points": eval_grid.total_points}
+            raise HTTPException(404, f"Aucune grille d'évaluation active pour le cas « {case.title} »")
+        grid = {"items": eval_grid.items, "version": eval_grid.version, "total_points": eval_grid.total_points}
         title, instructions, scenario = case.title, case.student_instructions, case.scenario_context
-    
-    # Récupérer tous les messages de la tentative pour construire le transcript
-    messages_stmt = select(Message).where(
-        Message.attempt_id == attempt_id
-    ).order_by(Message.created_at)
-    messages = session.exec(messages_stmt).all()
-    
-    print(messages)
-    
-    if not messages:
-        raise HTTPException(
-            400, 
-            "Aucun message dans cette tentative. Impossible d'évaluer."
-        )
-    
-    # Construire le transcript (commandes filtrées, coupures de parole signalées)
+    context = (f"Titre : {title}\nType de station : {case.station_type.value}\n\n"
+               f"Consignes pour l'étudiant :\n{instructions}\n\nContexte du scénario :\n{scenario}\n")
+    return grid, context, info
+
+
+def _student_text(messages: list) -> str:
+    return "\n".join(m.content for m in messages
+                     if m.role == ChatRole.student and not m.content.startswith("/"))
+
+
+def _save(session: Session, attempt_id: UUID, case_id: int, user_id: int, result: dict) -> dict:
+    """Enregistre la correction ; si une autre requête l'a enregistrée entre-temps
+    (double clic), renvoie celle-là plutôt qu'une erreur."""
+    evaluation = result["evaluation"]
+    record = EvaluationResult(attempt_id=attempt_id, case_id=case_id, user_id=user_id, evaluation_data=result,
+                              points_obtained=evaluation["score_20"], points_possible=20.0)
+    session.add(record)
+    try:
+        session.flush()
+    except IntegrityError:
+        session.rollback()
+        existing = session.exec(select(EvaluationResult).where(EvaluationResult.attempt_id == attempt_id)).first()
+        if existing is None:
+            raise
+        return existing.evaluation_data
+    for item in evaluation.get("items", []):
+        session.add(EvaluationItemResult(
+            evaluation_result_id=record.id, attempt_id=attempt_id, case_id=case_id, user_id=user_id,
+            edn_code=item.get("edn_code") or "", item_name=item.get("criterion", ""),
+            points_obtained=item.get("points_awarded", 0.0), points_possible=item.get("points_possible", 0.0),
+            justification=item.get("justification", ""), evaluated_at=datetime.now()))
+    session.commit()
+    return result
+
+
+def run_evaluation(session: Session, attempt: Attempts) -> dict:
+    """Correction complète d'une tentative terminée : transcription, appel au LLM (connexion à la
+    base rendue pendant l'appel), vérification, note, enregistrement. HTTPException 503 si échec."""
+    case = session.get(ClinicalCase, attempt.case_id)
+    if not case:
+        raise HTTPException(404, "Cas clinique introuvable")
+    grid, case_context, info = _grid_and_context(session, attempt, case)
+    messages = session.exec(select(Message).where(Message.attempt_id == attempt.id)
+                            .order_by(Message.created_at)).all()
     transcript, _ = build_evaluation_transcript(
         messages, no_interlocutor=info.get("interlocutor") == "aucun",
         professional=info.get("interlocutor_label") if info.get("interlocutor") == "professionnel" else None)
-    
-    # Préparer le contexte du cas
-    case_context = f"""
-Titre: {title}
-Type de station: {case.station_type.value}
+    student_text = _student_text(messages)
+    attempt_id, case_id, owner_id = attempt.id, case.id, attempt.user_id
+    # Fin de la transaction de lecture : la connexion retourne au pool pendant l'appel au modèle
+    session.rollback()
 
-Consignes pour l'étudiant:
-{instructions}
+    if not student_text.strip():
+        output = silent_evaluation(grid)
+    else:
+        try:
+            output = evaluate_attempt_with_llm(transcript=transcript, evaluation_grid=grid, case_context=case_context)
+        except EvaluationUnavailable as exc:
+            logger.warning("Correction indisponible pour la tentative %s : %s", attempt_id, exc)
+            raise HTTPException(503, UNAVAILABLE_MESSAGE)
+        if missing_parts(output, grid):
+            raise HTTPException(503, UNAVAILABLE_MESSAGE)
+    result = score_evaluation(output, grid, student_text)
+    return _save(session, attempt_id, case_id, owner_id, result)
 
-Contexte du scénario:
-{scenario}
-"""
-    
-    # Appeler le LLM pour évaluer
-    try:
-        evaluation_result = evaluate_attempt_with_llm(
-            transcript=transcript,
-            evaluation_grid=grid_structure,
-            case_context=case_context
-        )
-    except Exception as e:
-        raise HTTPException(
-            500, 
-            f"Erreur lors de l'évaluation par le LLM: {str(e)}"
-        )
-    
-    # Totaux recalculés, échelles d'attitude, note /20 (jamais les sommes du LLM)
-    evaluation_result = score_evaluation(evaluation_result, grid_structure)
-    points_obtained = evaluation_result["evaluation"]["score_20"]
-    points_possible = 20.0
-    
-    # Sauvegarder le résultat de l'évaluation dans la base de données
-    # Créer une nouvelle évaluation
-    new_evaluation = EvaluationResult(
-        attempt_id=attempt_id,
-        case_id=case.id,
-        user_id=user_id,
-        evaluation_data=evaluation_result,
-        points_obtained=points_obtained,
-        points_possible=points_possible
-    )
-    session.add(new_evaluation)
+
+@router.post("/attempts/{attempt_id}/evaluate", response_model=EvaluationOut)
+def evaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_session)],
+                     user: Annotated[User, Depends(check_authorization(UserRole.student))]):
+    """Correction d'une tentative terminée, après la station (l'évaluateur n'intervient jamais
+    pendant). Mise en cache : un second appel renvoie la même correction. 503 si la correction
+    n'a pas abouti (rien n'est enregistré : l'étudiant peut relancer)."""
+    attempt = session.get(Attempts, attempt_id)
+    if not attempt or attempt.user_id != user.id:
+        raise HTTPException(404, "Tentative non trouvée")
+    if not attempt.is_completed:
+        raise HTTPException(400, "Terminez la station avant de demander la correction.")
+    existing = session.exec(select(EvaluationResult).where(EvaluationResult.attempt_id == attempt_id)).first()
+    if existing:
+        return existing.evaluation_data
+    return run_evaluation(session, attempt)
+
+
+# ==================== RELECTURE PAR UN ENSEIGNANT ====================
+
+def can_review(case: Optional[ClinicalCase], user: User) -> bool:
+    return case is not None and (user.role == UserRole.admin
+                                 or (user.role == UserRole.teacher and case.created_by == user.id))
+
+
+def _reviewable_attempt(session: Session, attempt_id: UUID, user: User) -> tuple[Attempts, ClinicalCase]:
+    attempt = session.get(Attempts, attempt_id)
+    case = session.get(ClinicalCase, attempt.case_id) if attempt else None
+    if not attempt or not can_review(case, user):
+        raise HTTPException(404, "Tentative non trouvée")
+    return attempt, case
+
+
+class ItemOverride(BaseModel):
+    points_awarded: float = Field(ge=0)
+    justification: Optional[str] = Field(default=None, max_length=4000)
+
+
+@router.get("/attempts/{attempt_id}/review")
+def review_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_session)],
+                   user: Annotated[User, Depends(check_authorization(UserRole.teacher))]):
+    """Transcription et correction d'une tentative, pour l'auteur de la station (ou un admin)."""
+    attempt, case = _reviewable_attempt(session, attempt_id, user)
+    student = session.get(User, attempt.user_id)
+    existing = session.exec(select(EvaluationResult).where(EvaluationResult.attempt_id == attempt_id)).first()
+    return {
+        "attempt_id": str(attempt.id), "case_id": case.id, "case_title": case.title,
+        "username": student.username if student else None, "full_name": student.full_name if student else None,
+        "completed_at": attempt.completed_at.isoformat() if attempt.completed_at else None,
+        "transcript": _transcript_rows(session, attempt.id),
+        "evaluation": existing.evaluation_data["evaluation"] if existing else None,
+    }
+
+
+@router.patch("/attempts/{attempt_id}/items/{item_id}", response_model=EvaluationOut)
+def override_item(attempt_id: UUID, item_id: str, payload: ItemOverride,
+                  session: Annotated[Session, Depends(get_session)],
+                  user: Annotated[User, Depends(check_authorization(UserRole.teacher))]):
+    """Modification d'un item par l'enseignant : points, justification ; note recalculée, tracée."""
+    _reviewable_attempt(session, attempt_id, user)
+    record = session.exec(select(EvaluationResult).where(EvaluationResult.attempt_id == attempt_id)).first()
+    if record is None:
+        raise HTTPException(404, "Pas encore de correction pour cette tentative")
+    data = copy.deepcopy(record.evaluation_data)
+    evaluation = data["evaluation"]
+    item = next((i for i in evaluation.get("items") or [] if str(i.get("item_id")) == item_id), None)
+    if item is None:
+        raise HTTPException(404, "Item introuvable dans la grille")
+    if payload.points_awarded > float(item["points_possible"]):
+        raise HTTPException(422, f"Au plus {item['points_possible']:g} point(s) pour cet item")
+    item["points_awarded"] = payload.points_awarded
+    if payload.justification is not None:
+        item["justification"] = payload.justification.strip() or item["justification"]
+    item["overridden"] = True
+    recompute_totals(evaluation)
+    evaluation["reviewed_by"] = user.full_name or user.username
+    evaluation["reviewed_at"] = datetime.now().isoformat(timespec="seconds")
+    record.evaluation_data = data
+    record.points_obtained = evaluation["score_20"]
+    record.evaluated_at = datetime.now()
+    row = session.exec(select(EvaluationItemResult).where(
+        EvaluationItemResult.evaluation_result_id == record.id,
+        EvaluationItemResult.item_name == item.get("criterion", ""))).first()
+    if row is not None:
+        row.points_obtained = item["points_awarded"]
+        row.justification = item["justification"]
+        session.add(row)
+    session.add(record)
     session.commit()
-    session.refresh(new_evaluation)
-    evaluation_result_id = new_evaluation.id
-    
-    # Créer les résultats individuels pour chaque item
-    evaluation_items = evaluation_result["evaluation"].get("items", [])
-    for item in evaluation_items:
-        item_result = EvaluationItemResult(
-            evaluation_result_id=evaluation_result_id,
-            attempt_id=attempt_id,
-            case_id=case.id,
-            user_id=user_id,
-            edn_code=item.get("edn_code", ""),
-            item_name=item.get("criterion", ""),
-            points_obtained=item.get("points_obtained", 0.0),
-            points_possible=item.get("points_possible", 0.0),
-            justification=item.get("justification", ""),
-            evaluated_at=datetime.now()
-        )
-        session.add(item_result)
-    
-    session.commit()
-    
-    return evaluation_result
+    return data
+
+
+@router.post("/attempts/{attempt_id}/reevaluate", response_model=EvaluationOut)
+def reevaluate_attempt(attempt_id: UUID, session: Annotated[Session, Depends(get_session)],
+                       user: Annotated[User, Depends(check_authorization(UserRole.teacher))]):
+    """Nouvelle correction automatique (remplace l'ancienne, y compris les modifications)."""
+    attempt, _ = _reviewable_attempt(session, attempt_id, user)
+    if not attempt.is_completed:
+        raise HTTPException(400, "La tentative n'est pas terminée.")
+    record = session.exec(select(EvaluationResult).where(EvaluationResult.attempt_id == attempt_id)).first()
+    if record is not None:
+        for row in session.exec(select(EvaluationItemResult).where(
+                EvaluationItemResult.evaluation_result_id == record.id)).all():
+            session.delete(row)
+        session.delete(record)
+        session.commit()
+    attempt = session.get(Attempts, attempt_id)
+    return run_evaluation(session, attempt)
+
+
+def _transcript_rows(session: Session, attempt_id: UUID) -> list[dict]:
+    messages = session.exec(select(Message).where(Message.attempt_id == attempt_id)
+                            .order_by(Message.created_at)).all()
+    return [{"id": str(m.id), "role": m.role.value, "content": m.content, "modality": m.modality,
+             "interrupted_by": m.interrupted_by, "spoken_content": m.spoken_content,
+             "timestamp": m.created_at.isoformat() if m.created_at else None}
+            for m in messages if m.role.value != "system"]
 
 
 @router.get("/attempts/{attempt_id}/transcript")
@@ -257,32 +301,10 @@ def get_transcript(attempt_id: UUID, session: Session = Depends(get_session), us
     if not attempt or attempt.user_id != user_id:
         raise HTTPException(404, "Tentative non trouvée")
     
-    messages_stmt = select(Message).where(
-        Message.attempt_id == attempt_id
-    ).order_by(Message.created_at)
-    messages = session.exec(messages_stmt).all()
-    
-    transcript = []
-    interruptions = []
-    for msg in messages:
-        if msg.role.value != "system":
-            transcript.append({
-                "id": msg.id,
-                "role": msg.role.value,
-                "content": msg.content,
-                "modality": msg.modality,
-                "interrupted_by": msg.interrupted_by,
-                "spoken_content": msg.spoken_content,
-                "timestamp": msg.created_at.isoformat() if msg.created_at else None
-            })
-            if msg.interrupted_by:
-                interruptions.append({
-                    "message_id": str(msg.id),
-                    "reason": msg.interrupted_by,
-                    "spoken_content": msg.spoken_content,
-                    "full_reply": msg.content,
-                })
-    
+    transcript = _transcript_rows(session, attempt_id)
+    interruptions = [{"message_id": str(r["id"]), "reason": r["interrupted_by"],
+                      "spoken_content": r["spoken_content"], "full_reply": r["content"]}
+                     for r in transcript if r["interrupted_by"]]
     return {
         "attempt_id": attempt_id,
         "case_id": attempt.case_id,

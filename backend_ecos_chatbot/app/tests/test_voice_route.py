@@ -261,7 +261,7 @@ def test_expired_attempt_reports_error(voice_app, world, session):
         ws.receive_json()
         speak(ws)
         events = read_until(ws, "error")
-    assert events[-1][1]["status"] == 408
+    assert events[-1][1]["status"] == 410
 
 
 def test_rejects_unauthenticated(voice_app, world, monkeypatch):

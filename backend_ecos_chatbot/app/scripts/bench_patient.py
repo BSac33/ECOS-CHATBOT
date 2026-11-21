@@ -30,7 +30,6 @@ import csv
 import json
 import os
 import random
-import statistics
 import sys
 import tempfile
 import time

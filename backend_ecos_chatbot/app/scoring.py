@@ -14,6 +14,8 @@ jamais confiance aux sommes renvoyées par le LLM.
 """
 from __future__ import annotations
 
+import re
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 from case_sheet import LEVEL_NAMES
@@ -29,8 +31,59 @@ def _level(value: Any) -> Optional[int]:
     return min(4, max(0, level))
 
 
-def score_evaluation(result: Dict[str, Any], grid: Dict[str, Any]) -> Dict[str, Any]:
-    """Complète result["evaluation"] (sortie du LLM) avec les totaux, les échelles et la note /20."""
+# ==================== CITATIONS ====================
+
+_QUOTED_RE = re.compile(r"«\s*([^»]+?)\s*»|\"([^\"]+)\"|“([^”]+)”")
+
+
+def _normalize(text: str) -> str:
+    text = unicodedata.normalize("NFKD", (text or "").lower())
+    text = "".join(c for c in text if not unicodedata.combining(c))
+    return " ".join(re.findall(r"[a-z0-9]+", text))
+
+
+def _trigrams(words: List[str]) -> set:
+    return {tuple(words[i:i + 3]) for i in range(len(words) - 2)}
+
+
+def citation_found(citation: str, student_text: str) -> bool:
+    """Chaque passage cité (séparés par « / ») figure dans les paroles de l'étudiant :
+    mot pour mot après normalisation, ou à 80 % des trigrammes près pour les passages longs."""
+    haystack = _normalize(student_text)
+    hay_words = haystack.split()
+    hay_tri = _trigrams(hay_words)
+    segments = [seg for seg in re.split(r"\s+/\s+|…|\.\.\.", citation or "") if _normalize(seg)]
+    if not segments:
+        return False
+    for seg in segments:
+        norm = _normalize(seg)
+        if norm in haystack:
+            continue
+        words = norm.split()
+        tri = _trigrams(words)
+        if len(words) < 4 or not tri or len(tri & hay_tri) / len(tri) < 0.8:
+            return False
+    return True
+
+
+def _citation(raw: Dict[str, Any]) -> str:
+    citation = (raw.get("citation") or "").strip()
+    if citation:
+        return citation
+    # Anciennes sorties : citation entre guillemets dans la justification
+    quotes = [next(g for g in m.groups() if g) for m in _QUOTED_RE.finditer(raw.get("justification") or "")]
+    return " / ".join(q.strip() for q in quotes if q.strip())
+
+
+# ==================== NOTE ====================
+
+def score_evaluation(result: Dict[str, Any], grid: Dict[str, Any],
+                     student_text: Optional[str] = None) -> Dict[str, Any]:
+    """Complète result["evaluation"] (sortie du LLM) avec les totaux, les échelles et la note /20.
+
+    student_text (paroles de l'étudiant) : si fourni, chaque item noté doit citer l'étudiant ;
+    sans citation, l'item ne rapporte rien ; une citation introuvable est signalée
+    (citation_found=False, needs_review=True) pour relecture par un enseignant."""
     evaluation = dict(result.get("evaluation") or result)
     points = {str(i.get("id")): float(i.get("points", 1)) for i in grid.get("items", [])}
 
@@ -42,13 +95,26 @@ def score_evaluation(result: Dict[str, Any], grid: Dict[str, Any]) -> Dict[str, 
         possible = points.get(item_id, 1.0)
         raw = by_id.get(item_id, {})
         awarded = min(possible, max(0.0, float(raw.get("points_awarded") or 0)))
+        justification = raw.get("justification") or "Non évalué."
+        citation = _citation(raw)
+        found = None
+        if student_text is not None and awarded > 0:
+            if not citation:
+                awarded = 0.0
+                justification = "Points non accordés : aucune citation de l'étudiant. " + justification
+            else:
+                found = citation_found(citation, student_text)
         items.append({
             "item_id": item_id,
             "criterion": gi.get("criterion", raw.get("criterion", "")),
+            "edn_code": gi.get("edn_code") or "",
             "points_awarded": awarded,
             "points_possible": possible,
             "is_validated": awarded > 0,
-            "justification": raw.get("justification") or "Non évalué.",
+            "justification": justification,
+            "citation": citation or None,
+            "citation_found": found,
+            "overridden": False,
         })
     items_score = sum(i["points_awarded"] for i in items)
     items_possible = sum(i["points_possible"] for i in items)
@@ -98,8 +164,32 @@ def score_evaluation(result: Dict[str, Any], grid: Dict[str, Any]) -> Dict[str, 
         "score_20": score_20,
         "percentage": round(score_20 * 5, 1),
         "general_feedback": evaluation.get("general_feedback") or "",
+        "needs_review": any(i["citation_found"] is False for i in items),
+        "reviewed_by": None,
+        "reviewed_at": None,
     })
     return {"evaluation": evaluation}
+
+
+def recompute_totals(evaluation: Dict[str, Any]) -> Dict[str, Any]:
+    """Totaux et note /20 d'une correction déjà enregistrée (après modification d'un item)."""
+    items = evaluation.get("items") or []
+    for item in items:
+        item["points_awarded"] = min(float(item["points_possible"]), max(0.0, float(item["points_awarded"])))
+        item["is_validated"] = item["points_awarded"] > 0
+    items_score = sum(i["points_awarded"] for i in items)
+    items_possible = sum(i["points_possible"] for i in items)
+    items_ratio = items_score / items_possible if items_possible else 0.0
+    rated = [s["level"] for s in evaluation.get("scales") or [] if s.get("level") is not None]
+    weight = float(evaluation.get("attitude_weight") or 0.0) if rated else 0.0
+    scales_ratio = (sum(rated) / (4 * len(rated))) if rated else 0.0
+    score_20 = round(20 * ((1 - weight) * items_ratio + weight * scales_ratio), 2)
+    evaluation.update({"total_score": items_score, "total_possible": items_possible,
+                       "items_score": items_score, "items_possible": items_possible,
+                       "score_20": score_20, "percentage": round(score_20 * 5, 1),
+                       "needs_review": any(i.get("citation_found") is False and not i.get("overridden")
+                                           for i in items)})
+    return evaluation
 
 
 def scales_prompt(scales: List[dict], global_rating: bool) -> str:

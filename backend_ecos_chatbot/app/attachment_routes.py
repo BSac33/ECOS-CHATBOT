@@ -1,283 +1,232 @@
 """
-Routes pour la gestion des fichiers/attachements
-"""
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, Depends
-from fastapi.responses import Response, StreamingResponse
-from sqlmodel import Session, select
-from typing import Optional, List
-from uuid import UUID
-import uuid
-from pathlib import Path
-import mimetypes
+Pièces jointes des stations (ECG, imagerie, documents) : envoi, consultation, suppression.
 
+Accès :
+- enseignants et administrateurs : tout lire ; envoyer ou supprimer sur leurs propres
+  stations (administrateur : toutes) ;
+- étudiants : télécharger SEULEMENT un document qui leur a été montré dans une de leurs
+  tentatives (message de l'examinateur). Impossible de consulter les documents d'une
+  station avant de la jouer.
+
+Sécurité des fichiers : le type est déterminé par le contenu (octets magiques), pas par le
+nom ni par le type déclaré ; l'extension stockée en découle ; les fichiers sont servis avec
+nosniff et une politique de sécurité qui interdit tout script.
+"""
+from __future__ import annotations
+
+import logging
+import uuid
+from typing import List, Optional
+from urllib.parse import quote
+from uuid import UUID
+
+from anyio import from_thread
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
+from fastapi.responses import Response
+from sqlmodel import Session, select
+
+from auth import check_authorization
 from db import get_session
-from models import Attachment, AttachmentUploadOut, AttachmentOut, ClinicalCase
+from models import Attachment, AttachmentOut, AttachmentUploadOut, Attempts, ClinicalCase, Message, User, UserRole
 from storage import storage
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/attachments", tags=["attachments"])
 
-# Configuration
-MAX_FILE_SIZE = {
-    "image": 10 * 1024 * 1024,      # 10 MB
-    "video": 200 * 1024 * 1024,     # 200 MB
-    "document": 20 * 1024 * 1024,   # 20 MB
-    "audio": 50 * 1024 * 1024,      # 50 MB
-    "transcript": 10 * 1024 * 1024, # 10 MB
+# ==================== TYPES DE FICHIERS ====================
+
+# Type MIME -> (famille, extension stockée, taille maximale)
+SAFE_TYPES = {
+    "image/png": ("image", ".png", 15 * 2**20),
+    "image/jpeg": ("image", ".jpg", 15 * 2**20),
+    "image/gif": ("image", ".gif", 15 * 2**20),
+    "image/webp": ("image", ".webp", 15 * 2**20),
+    "application/pdf": ("document", ".pdf", 20 * 2**20),
+    "audio/mpeg": ("audio", ".mp3", 50 * 2**20),
+    "audio/wav": ("audio", ".wav", 50 * 2**20),
+    "audio/ogg": ("audio", ".ogg", 50 * 2**20),
+    "video/mp4": ("video", ".mp4", 200 * 2**20),
+    "video/webm": ("video", ".webm", 200 * 2**20),
 }
 
-ALLOWED_EXTENSIONS = {
-    "image": {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"},
-    "video": {".mp4", ".webm", ".mov", ".avi"},
-    "document": {".pdf", ".txt", ".json", ".docx"},
-    "audio": {".mp3", ".wav", ".ogg", ".m4a"},
-    "transcript": {".json", ".txt"}
+FILE_HEADERS = {
+    "X-Content-Type-Options": "nosniff",
+    # Même si un fichier contenait du HTML ou du script, le navigateur ne l'exécute pas
+    "Content-Security-Policy": "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'; sandbox",
+    "Cache-Control": "private, max-age=3600",
 }
 
 
-def detect_file_kind(filename: str, mime_type: str) -> str:
-    """Détecte le type de fichier basé sur l'extension et le MIME type"""
-    ext = Path(filename).suffix.lower()
-    
-    if mime_type.startswith("image/"):
-        return "image"
-    elif mime_type.startswith("video/"):
-        return "video"
-    elif mime_type.startswith("audio/"):
-        return "audio"
-    elif ext in {".pdf", ".doc", ".docx", ".txt"}:
-        return "document"
-    elif ext in {".json"} and "transcript" in filename.lower():
-        return "transcript"
-    else:
-        return "document"
+def sniff_mime(data: bytes) -> Optional[str]:
+    """Type réel d'après les premiers octets, parmi les types acceptés ; None sinon."""
+    head = data[:16]
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "image/jpeg"
+    if head[:6] in (b"GIF87a", b"GIF89a"):
+        return "image/gif"
+    if head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        return "image/webp"
+    if head[:4] == b"RIFF" and head[8:12] == b"WAVE":
+        return "audio/wav"
+    if head.startswith(b"%PDF-"):
+        return "application/pdf"
+    if head.startswith(b"ID3") or head[:2] in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2"):
+        return "audio/mpeg"
+    if head.startswith(b"OggS"):
+        return "audio/ogg"
+    if head[4:8] == b"ftyp":
+        return "video/mp4"
+    if head.startswith(b"\x1a\x45\xdf\xa3"):
+        return "video/webm"
+    return None
 
 
-def validate_file(filename: str, kind: str) -> bool:
-    """Valide l'extension du fichier"""
-    ext = Path(filename).suffix.lower()
-    return ext in ALLOWED_EXTENSIONS.get(kind, set())
+def checked_upload(data: bytes, allowed: Optional[set] = None) -> tuple[str, str, str]:
+    """(type MIME réel, famille, extension) d'un fichier envoyé, ou HTTPException 415/413."""
+    mime = sniff_mime(data)
+    if mime is None or (allowed is not None and mime not in allowed):
+        names = sorted({SAFE_TYPES[m][1].lstrip(".").upper() for m in (allowed or SAFE_TYPES)})
+        raise HTTPException(415, "Format non accepté. Formats possibles : " + ", ".join(names) + ".")
+    kind, ext, max_size = SAFE_TYPES[mime]
+    if len(data) > max_size:
+        raise HTTPException(413, f"Fichier trop volumineux ({max_size // 2**20} Mo maximum).")
+    return mime, kind, ext
 
+
+def file_response(data: bytes, mime: str, filename: str) -> Response:
+    safe_mime = mime if mime in SAFE_TYPES else "application/octet-stream"
+    disposition = "inline" if safe_mime in SAFE_TYPES else "attachment"
+    ascii_name = "".join(c if c.isascii() and c not in '"\\;' else "_" for c in filename) or "fichier"
+    headers = {**FILE_HEADERS,
+               "Content-Disposition": f"{disposition}; filename=\"{ascii_name}\"; filename*=UTF-8''{quote(filename)}"}
+    return Response(content=data, media_type=safe_mime, headers=headers)
+
+
+# ==================== DROITS ====================
+
+teacher = check_authorization(UserRole.teacher)
+
+
+def _can_manage(case: Optional[ClinicalCase], user: User) -> bool:
+    return case is not None and (user.role == UserRole.admin or case.created_by == user.id)
+
+
+def can_download(session: Session, attachment: Attachment, user: User) -> bool:
+    if user.role in (UserRole.teacher, UserRole.admin):
+        return True
+    shown = session.exec(
+        select(Message.id).join(Attempts, Attempts.id == Message.attempt_id)
+        .where(Message.attachment_id == attachment.id, Attempts.user_id == user.id)
+    ).first()
+    return shown is not None
+
+
+def _out(a: Attachment) -> AttachmentOut:
+    return AttachmentOut(id=str(a.id), filename=a.filename, display_name=a.display_name, kind=a.kind,
+                         mime_type=a.mime_type, size_bytes=a.size_bytes,
+                         file_url=f"/attachments/download/{a.id}", uploaded_at=a.uploaded_at.isoformat())
+
+
+# ==================== ROUTES ====================
 
 @router.post("/upload", response_model=AttachmentUploadOut)
 async def upload_attachment(
     file: UploadFile = File(...),
     case_id: int = Form(...),
-    display_name: str = Form(...),
-    description: Optional[str] = Form(None),
-    trigger_keywords: Optional[str] = Form(None),
+    display_name: str = Form(..., max_length=200),
+    description: Optional[str] = Form(None, max_length=2000),
+    trigger_keywords: Optional[str] = Form(None, max_length=500),
     is_available_during_case: bool = Form(True),
-    db: Session = Depends(get_session)
+    db: Session = Depends(get_session),
+    user: User = Depends(teacher),
 ):
-    """
-    Upload un fichier et crée un Attachment en base de données.
-    
-    - **file**: Le fichier à uploader
-    - **case_id**: ID du cas clinique associé
-    - **display_name**: Nom affiché (ex: "Électrocardiogramme")
-    - **description**: Description pour aider le LLM (optionnel)
-    - **trigger_keywords**: Mots-clés pour détection auto (séparés par virgules)
-    - **is_available_during_case**: Le fichier est-il disponible pendant l'examen ?
-    """
-    
-    # Vérifier que le cas existe
+    """Ajoute un fichier à une station (enseignant auteur de la station, ou administrateur)."""
     case = db.get(ClinicalCase, case_id)
-    if not case:
-        raise HTTPException(status_code=404, detail=f"Case {case_id} not found")
-    
-    # Lire le fichier
+    if not _can_manage(case, user):
+        raise HTTPException(404, "Station introuvable")
     content = await file.read()
-    file_size = len(content)
-    
-    # Déterminer le type de fichier
-    mime_type = file.content_type or mimetypes.guess_type(file.filename)[0] or "application/octet-stream"
-    kind = detect_file_kind(file.filename, mime_type)
-    
-    # Valider l'extension
-    if not validate_file(file.filename, kind):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid file extension for type '{kind}'. Allowed: {ALLOWED_EXTENSIONS[kind]}"
-        )
-    
-    # Vérifier la taille
-    max_size = MAX_FILE_SIZE.get(kind, 10_000_000)
-    if file_size > max_size:
-        raise HTTPException(
-            status_code=413,
-            detail=f"File too large. Max size for {kind}: {max_size / 1024 / 1024:.1f} MB"
-        )
-    
-    # Générer un nom unique
-    file_ext = Path(file.filename).suffix
-    stored_filename = f"{uuid.uuid4()}{file_ext}"
-    
-    # Chemin organisé par type et case_id
+    mime, kind, ext = checked_upload(content)
+    stored_filename = f"{uuid.uuid4()}{ext}"
     file_path = f"{kind}/{case_id}/{stored_filename}"
-    
-    # Sauvegarder le fichier
     try:
         file_url = await storage.save_file(content, file_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to save file: {str(e)}")
-    
-    # Créer l'entrée en base de données
-    attachment = Attachment(
-        case_id=case_id,
-        filename=file.filename,
-        stored_filename=stored_filename,
-        display_name=display_name,
-        description=description,
-        kind=kind,
-        mime_type=mime_type,
-        size_bytes=file_size,
-        file_path=file_path,
-        file_url=file_url,
-        is_available_during_case=is_available_during_case,
-        trigger_keywords=trigger_keywords
-    )
-    
+    except Exception:  # noqa: BLE001
+        logger.exception("Échec d'écriture du fichier %s", file_path)
+        raise HTTPException(500, "Le fichier n'a pas pu être enregistré.")
+    attachment = Attachment(case_id=case_id, filename=(file.filename or stored_filename)[:255],
+                            stored_filename=stored_filename, display_name=display_name, description=description,
+                            kind=kind, mime_type=mime, size_bytes=len(content), file_path=file_path,
+                            file_url=file_url, is_available_during_case=is_available_during_case,
+                            trigger_keywords=trigger_keywords)
     db.add(attachment)
     db.commit()
     db.refresh(attachment)
-    
-    return AttachmentUploadOut(
-        id=str(attachment.id),  # Sérialiser UUID en string
-        filename=attachment.filename,
-        file_url=attachment.file_url,
-        kind=attachment.kind,
-        size_bytes=attachment.size_bytes
-    )
-
-
-@router.get("/{attachment_id}", response_model=AttachmentOut)
-async def get_attachment_info(
-    attachment_id: UUID,
-    db: Session = Depends(get_session)
-):
-    """Récupère les informations d'un attachment par son ID"""
-    attachment = db.get(Attachment, attachment_id)
-    if not attachment:
-        raise HTTPException(status_code=404, detail="Attachment not found")
-    
-    return AttachmentOut(
-        id=str(attachment.id),  # Sérialiser UUID
-        filename=attachment.filename,
-        display_name=attachment.display_name,
-        kind=attachment.kind,
-        mime_type=attachment.mime_type,
-        size_bytes=attachment.size_bytes,
-        file_url=attachment.file_url,
-        uploaded_at=attachment.uploaded_at.isoformat()
-    )
+    return AttachmentUploadOut(id=str(attachment.id), filename=attachment.filename,
+                               file_url=f"/attachments/download/{attachment.id}", kind=attachment.kind,
+                               size_bytes=attachment.size_bytes)
 
 
 @router.get("/case/{case_id}", response_model=List[AttachmentOut])
-async def get_case_attachments(
-    case_id: int,
-    available_only: bool = True,
-    db: Session = Depends(get_session)
-):
-    """Récupère tous les attachments d'un cas clinique"""
+def get_case_attachments(case_id: int, available_only: bool = True, db: Session = Depends(get_session),
+                         user: User = Depends(teacher)):
+    """Pièces jointes d'une station (enseignants et administrateurs)."""
     query = select(Attachment).where(Attachment.case_id == case_id)
-    
     if available_only:
-        query = query.where(Attachment.is_available_during_case == True)
-    
-    attachments = db.exec(query).all()
-    
-    return [
-        AttachmentOut(
-            id=str(a.id),  # Sérialiser UUID
-            filename=a.filename,
-            display_name=a.display_name,
-            kind=a.kind,
-            mime_type=a.mime_type,
-            size_bytes=a.size_bytes,
-            file_url=a.file_url,
-            uploaded_at=a.uploaded_at.isoformat()
-        )
-        for a in attachments
-    ]
+        query = query.where(Attachment.is_available_during_case == True)  # noqa: E712
+    return [_out(a) for a in db.exec(query).all()]
 
 
 @router.get("/download/{attachment_id}")
-async def download_attachment(
-    attachment_id: UUID,
-    db: Session = Depends(get_session)
-):
-    """Télécharge le fichier d'un attachment"""
+def download_attachment(attachment_id: UUID, db: Session = Depends(get_session),
+                              user: User = Depends(check_authorization())):
+    """Fichier d'une pièce jointe ; un étudiant n'obtient que les documents qui lui ont été montrés."""
+    attachment = db.get(Attachment, attachment_id)
+    if attachment is None or not can_download(db, attachment, user):
+        raise HTTPException(404, "Document introuvable")
+    try:
+        data = from_thread.run(storage.get_file, attachment.file_path)
+    except FileNotFoundError:
+        raise HTTPException(404, "Document introuvable")
+    except Exception:  # noqa: BLE001
+        logger.exception("Lecture impossible : %s", attachment.file_path)
+        raise HTTPException(500, "Le document n'a pas pu être lu.")
+    return file_response(data, attachment.mime_type or "", attachment.filename or "document")
+
+
+@router.get("/{attachment_id}", response_model=AttachmentOut)
+def get_attachment_info(attachment_id: UUID, db: Session = Depends(get_session), user: User = Depends(teacher)):
     attachment = db.get(Attachment, attachment_id)
     if not attachment:
-        raise HTTPException(status_code=404, detail="Attachment not found")
-    
-    try:
-        file_data = await storage.get_file(attachment.file_path)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail="File not found on storage")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
-    
-    return Response(
-        content=file_data,
-        media_type=attachment.mime_type,
-        headers={
-            "Content-Disposition": f'inline; filename="{attachment.filename}"'
-        }
-    )
+        raise HTTPException(404, "Document introuvable")
+    return _out(attachment)
 
 
 @router.delete("/{attachment_id}")
-async def delete_attachment(
-    attachment_id: UUID,
-    db: Session = Depends(get_session)
-):
-    """Supprime un attachment et son fichier"""
+def delete_attachment(attachment_id: UUID, db: Session = Depends(get_session), user: User = Depends(teacher)):
     attachment = db.get(Attachment, attachment_id)
-    if not attachment:
-        raise HTTPException(status_code=404, detail="Attachment not found")
-    
-    # Supprimer le fichier du stockage
+    if attachment is None or not _can_manage(db.get(ClinicalCase, attachment.case_id), user):
+        raise HTTPException(404, "Document introuvable")
     try:
-        await storage.delete_file(attachment.file_path)
-    except Exception as e:
-        # Log l'erreur mais continue la suppression de la DB
-        print(f"Warning: Could not delete file {attachment.file_path}: {e}")
-    
-    # Supprimer l'entrée de la base de données
+        from_thread.run(storage.delete_file, attachment.file_path)
+    except Exception:  # noqa: BLE001
+        logger.warning("Fichier non supprimé du stockage : %s", attachment.file_path)
     db.delete(attachment)
     db.commit()
-    
-    return {"message": "Attachment deleted successfully"}
+    return {"message": "Document supprimé."}
 
 
-def find_matching_attachments(
-    message: str,
-    case_id: int,
-    db: Session
-) -> List[Attachment]:
-    """
-    Trouve les attachments dont les mots-clés correspondent au message de l'étudiant.
-    Utilisé pour attacher automatiquement des fichiers aux réponses du LLM.
-    """
-    # Récupérer tous les attachments disponibles pour ce cas
+def find_matching_attachments(message: str, case_id: int, db: Session) -> List[Attachment]:
+    """Pièces jointes dont un mot-clé apparaît dans le message (patient sans outils)."""
     attachments = db.exec(
         select(Attachment)
         .where(Attachment.case_id == case_id)
-        .where(Attachment.is_available_during_case == True)
+        .where(Attachment.is_available_during_case == True)  # noqa: E712
         .where(Attachment.trigger_keywords.isnot(None))
     ).all()
-    
     message_lower = message.lower()
-    matched = []
-    
-    for attachment in attachments:
-        if not attachment.trigger_keywords:
-            continue
-            
-        keywords = [k.strip().lower() for k in attachment.trigger_keywords.split(",")]
-        
-        # Vérifier si un des mots-clés est présent dans le message
-        if any(keyword in message_lower for keyword in keywords):
-            matched.append(attachment)
-    
-    return matched
+    return [a for a in attachments
+            if a.trigger_keywords and any(k.strip().lower() in message_lower
+                                          for k in a.trigger_keywords.split(",") if k.strip())]

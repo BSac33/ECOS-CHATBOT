@@ -249,11 +249,11 @@ async def test_json_agent_failure_returns_502_and_stores_nothing(session, world,
 
 
 @pytest.mark.asyncio
-async def test_legacy_provider_uses_keyword_matching(session, world, monkeypatch):
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
+async def test_agent_disabled_uses_keyword_matching(session, world, monkeypatch):
+    monkeypatch.setenv("PATIENT_AGENT_ENABLED", "false")
 
     def must_not_be_called(**kwargs):
-        raise AssertionError("l'agent ne doit pas être appelé en mode legacy")
+        raise AssertionError("l'agent ne doit pas être appelé quand il est désactivé")
 
     monkeypatch.setattr(chat_routes, "stream_patient_agent", must_not_be_called)
     monkeypatch.setattr(chat_routes, "generate_patient_reply", lambda **kw: "D'accord.")
@@ -358,7 +358,7 @@ async def test_sse_validation_errors_are_plain_http_errors(session, world):
     session.commit()
     with pytest.raises(chat_routes.HTTPException) as exc:
         await chat_routes.chat_stream(world["attempt"].id, ChatIn(message="Bonjour"), session=session, user=world["user"])
-    assert exc.value.status_code == 400
+    assert exc.value.status_code == 409
 
 
 # ---------- Bout en bout HTTP (FastAPI + Starlette réels) ----------
