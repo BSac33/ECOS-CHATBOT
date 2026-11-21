@@ -39,9 +39,10 @@ function move(index: number, delta: number) {
              :data-field="`correction.grid[${index}]`">
       <div class="grid-top">
         <span class="grid-number">{{ index + 1 }}</span>
-        <InputText v-model="item.criterion" placeholder="Critère observable (ex. « Recherche le tabagisme »)" fluid class="criterion" />
+        <InputText v-model="item.criterion" placeholder="Critère observable (ex. « Recherche le tabagisme »)" fluid class="criterion"
+                   :aria-label="`Critère de l'item ${index + 1}`" />
         <InputNumber v-model="item.points" :min="0" :max="20" :step="0.5" show-buttons :min-fraction-digits="0"
-                     :max-fraction-digits="1" suffix=" pt" class="points" aria-label="Points" />
+                     :max-fraction-digits="1" suffix=" pt" class="points" :aria-label="`Points de l'item ${index + 1}`" />
         <Button icon="pi pi-arrow-up" text rounded severity="secondary" aria-label="Monter" :disabled="index === 0" @click="move(index, -1)" />
         <Button icon="pi pi-arrow-down" text rounded severity="secondary" aria-label="Descendre"
                 :disabled="index === grid.length - 1" @click="move(index, 1)" />

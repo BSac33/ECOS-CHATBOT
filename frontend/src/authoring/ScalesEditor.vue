@@ -35,7 +35,8 @@ function customize(id: string) {
   <div class="scales-editor">
     <p class="hint">
       Cochées par l'évaluateur de 0 (inacceptable) à 4 (remarquable). Elles comptent pour
-      <InputNumber v-model="weightPercent" :min="0" :max="50" suffix=" %" input-class="weight" /> de la note /20
+      <InputNumber v-model="weightPercent" :min="0" :max="50" suffix=" %" input-class="weight"
+                   aria-label="Part des échelles d’attitude dans la note, en pourcentage" /> de la note /20
       (ECOS nationaux : 20 à 30 %).
     </p>
     <div class="scale-list">

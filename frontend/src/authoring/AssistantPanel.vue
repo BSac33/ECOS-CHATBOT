@@ -7,6 +7,7 @@ import Message from 'primevue/message'
 import Tag from 'primevue/tag'
 import SourceLinks from './SourceLinks.vue'
 import { authoringApi, CATEGORY_LABELS, type AssistTask, type CaseSheet, type Proposal } from './api'
+import { errorMessage } from '../services/http'
 
 const sheet = defineModel<CaseSheet>('sheet', { required: true })
 const props = defineProps<{ caseId: number }>()
@@ -37,8 +38,8 @@ async function run(task: AssistTask) {
   error.value = ''
   try {
     proposal.value = await authoringApi.assist(props.caseId, task, sheet.value, instructions.value)
-  } catch (e: any) {
-    error.value = e.message || 'L’assistant n’a pas pu répondre.'
+  } catch (e) {
+    error.value = errorMessage(e, 'L’assistant n’a pas pu répondre.')
   } finally {
     running.value = null
   }
@@ -108,9 +109,12 @@ function isEmpty(p: Proposal) {
               :loading="running === a.task" :disabled="running !== null" class="action" :title="a.help"
               @click="run(a.task)" />
     </div>
-    <InputText v-model="instructions" size="small" fluid placeholder="Précision facultative (ex. « patiente plus âgée, très anxieuse »)" />
+    <label for="assist-instructions" class="sr-only">Précision pour l'assistant (facultative)</label>
+    <InputText id="assist-instructions" v-model="instructions" size="small" fluid placeholder="Précision facultative (ex. « patiente plus âgée, très anxieuse »)" />
 
     <Message v-if="error" severity="error" :closable="false">{{ error }}</Message>
+
+    <p class="sr-only" role="status">{{ running ? 'Génération en cours, cela peut prendre une à deux minutes…' : '' }}</p>
 
     <section v-if="proposal" class="proposal">
       <header class="proposal-header">
@@ -216,7 +220,7 @@ function isEmpty(p: Proposal) {
 .item-head { display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
 .item-actions { display: flex; gap: 0.25rem; }
 .words { font-style: italic; color: #1e293b; }
-.before { color: #94a3b8; text-decoration: line-through; }
+.before { color: #64748b; text-decoration: line-through; }
 .muted { color: #64748b; }
 .small { font-size: 0.85rem; }
 .reactions { margin: 0; padding-left: 1.1rem; font-size: 0.9rem; }

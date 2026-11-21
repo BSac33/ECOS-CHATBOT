@@ -7,6 +7,7 @@ import InputText from 'primevue/inputtext'
 import Message from 'primevue/message'
 import Tag from 'primevue/tag'
 import { authoringApi, type CaseSummary } from './api'
+import { errorMessage } from '../services/http'
 
 const router = useRouter()
 const cases = ref<CaseSummary[] | null>(null)
@@ -19,8 +20,8 @@ const toReview = computed(() => (cases.value || []).filter((c) => !c.owned))
 onMounted(async () => {
   try {
     cases.value = await authoringApi.listCases()
-  } catch (e: any) {
-    error.value = e.message
+  } catch (e) {
+    error.value = errorMessage(e)
   }
 })
 
@@ -29,8 +30,8 @@ async function create() {
   try {
     const detail = await authoringApi.createCase(newTitle.value)
     router.push({ name: 'case-editor', params: { caseId: detail.id } })
-  } catch (e: any) {
-    error.value = e.message
+  } catch (e) {
+    error.value = errorMessage(e)
   } finally {
     creating.value = false
   }
@@ -46,7 +47,8 @@ async function create() {
     </p>
 
     <form class="create" @submit.prevent="create">
-      <InputText v-model="newTitle" placeholder="Titre de la nouvelle station (ex. « Douleur thoracique aux urgences »)" fluid />
+      <label for="new-title" class="sr-only">Titre de la nouvelle station</label>
+      <InputText id="new-title" v-model="newTitle" placeholder="Titre de la nouvelle station (ex. « Douleur thoracique aux urgences »)" fluid />
       <Button type="submit" label="Créer" icon="pi pi-plus" :loading="creating" />
     </form>
 
@@ -90,17 +92,20 @@ async function create() {
 </template>
 
 <style scoped>
-.authoring-page { height: 100%; overflow-y: auto; padding: 1rem 0 3rem; max-width: 60rem; box-sizing: border-box; }
+.authoring-page { padding: 1rem 0 3rem; max-width: 60rem; box-sizing: border-box; }
 h1 { font-size: 1.75rem; margin: 0.5rem 0; }
 .lead { color: #475569; }
-.create { display: flex; gap: 0.5rem; margin: 1.25rem 0; }
+.create { display: flex; gap: 0.5rem; margin: 1.25rem 0; flex-wrap: wrap; }
+.create :deep(.p-inputtext) { flex: 1 1 16rem; }
 .cases { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.5rem; }
 .case-row {
   display: flex; justify-content: space-between; align-items: center; gap: 1rem; flex-wrap: wrap;
   padding: 0.8rem 1rem; border: 1px solid #e2e8f0; border-radius: 10px; color: #1e293b; font-weight: 500;
+  text-decoration: none;
 }
+.case-row .case-title { text-decoration: underline; text-underline-offset: 0.15em; }
 .case-row:hover { background: #f8fafc; color: #1e293b; }
-.case-meta { display: flex; gap: 0.4rem; }
+.case-meta { display: flex; gap: 0.4rem; flex-wrap: wrap; }
 .muted { color: #64748b; }
 h2 { font-size: 1.15rem; margin: 1.5rem 0 0.6rem; }
 .author { color: #64748b; font-weight: 400; }

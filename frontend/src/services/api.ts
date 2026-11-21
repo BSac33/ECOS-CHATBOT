@@ -1,188 +1,128 @@
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
+// Appels à l'API (étudiants, compte, correction, relecture) : tous passent par le client unique http.ts
+import { http, LONG_TIMEOUT_MS, request } from './http'
+import type {
+  Attempt, AttemptCaseInfo, AttemptReview, AttemptTranscript, CaseAttemptRow, CaseInstructions, ChatMessage,
+  ClinicalCase, EvaluationEnvelope, Teaching, TimeRemaining, User,
+} from '../types'
 
 export interface LoginCredentials {
-  username: string;
-  password: string;
+  username: string
+  password: string
 }
 
-export interface AuthResponse {
-  message: string;
+const attempt = (id: string) => `/chat/attempts/${encodeURIComponent(id)}`
+const evaluation = (id: string) => `/evaluation/attempts/${encodeURIComponent(id)}`
+
+export const apiService = {
+  // ---------- Session ----------
+
+  /** POST /auth/token (formulaire OAuth2) : le serveur pose le cookie HttpOnly. */
+  login(credentials: LoginCredentials): Promise<{ message: string }> {
+    const form = new URLSearchParams()
+    form.append('username', credentials.username)
+    form.append('password', credentials.password)
+    // 401 = identifiants refusés : pas de redirection, le formulaire affiche l'erreur
+    return request('/auth/token', { method: 'POST', body: form, skipAuthRedirect: true })
+  },
+
+  logout(): Promise<unknown> {
+    return http.post('/auth/logout', undefined, { skipAuthRedirect: true })
+  },
+
+  /** Vérification de session : 401 signifie simplement « non connecté ». */
+  getCurrentUser(): Promise<User> {
+    return http.get<User>('/api/users/me', { skipAuthRedirect: true })
+  },
+
+  // ---------- Compte ----------
+
+  /** Export RGPD : le fichier JSON tel que renvoyé par le serveur. */
+  exportMyData(): Promise<Blob> {
+    return http.get<Blob>('/api/users/me/export', { responseType: 'blob' })
+  },
+
+  /** Suppression du compte (mot de passe demandé). Un mot de passe faux ne déconnecte pas. */
+  deleteMyAccount(password: string): Promise<void> {
+    return http.delete<void>('/api/users/me', { password }, { skipAuthRedirect: true })
+  },
+
+  // ---------- Stations ----------
+
+  getClinicalCases(filters?: { station_type?: string; discipline?: string }): Promise<ClinicalCase[]> {
+    const params = new URLSearchParams()
+    if (filters?.station_type) params.append('station_type', filters.station_type)
+    if (filters?.discipline) params.append('discipline', filters.discipline)
+    const query = params.toString()
+    return http.get<ClinicalCase[]>(`/api/cases${query ? `?${query}` : ''}`)
+  },
+
+  getClinicalCase(id: number): Promise<ClinicalCase> {
+    return http.get<ClinicalCase>(`/api/cases/${id}`)
+  },
+
+  getCaseInstructions(id: number): Promise<CaseInstructions> {
+    return http.get<CaseInstructions>(`/api/cases/${id}/instructions`)
+  },
+
+  /** Tentative en cours pour ce cas (null s'il n'y en a pas). */
+  getActiveAttempt(caseId: number): Promise<Attempt | null> {
+    return http.get<Attempt | null>(`/chat/cases/${caseId}/active-attempt`)
+  },
+
+  createAttempt(caseId: number): Promise<Attempt> {
+    return http.post<Attempt>('/chat/attempts', { case_id: caseId })
+  },
+
+  // ---------- Station en cours ----------
+
+  getMessages(attemptId: string): Promise<ChatMessage[]> {
+    return http.get<ChatMessage[]>(`${attempt(attemptId)}/messages`)
+  },
+
+  getAttemptCaseInfo(attemptId: string): Promise<AttemptCaseInfo> {
+    return http.get<AttemptCaseInfo>(`${attempt(attemptId)}/case-info`)
+  },
+
+  getTimeRemaining(attemptId: string): Promise<TimeRemaining> {
+    return http.get<TimeRemaining>(`${attempt(attemptId)}/time-remaining`)
+  },
+
+  finalizeAttempt(attemptId: string): Promise<{ status: string; completed_at: string }> {
+    return http.post(`${attempt(attemptId)}/finalize`)
+  },
+
+  // ---------- Correction et débriefing ----------
+
+  /** Correction (mise en cache côté serveur) : peut prendre plusieurs minutes. */
+  evaluateAttempt(attemptId: string): Promise<EvaluationEnvelope> {
+    return http.post<EvaluationEnvelope>(`${evaluation(attemptId)}/evaluate`, undefined, { timeout: LONG_TIMEOUT_MS })
+  },
+
+  getAttemptTeaching(attemptId: string): Promise<Teaching> {
+    return http.get<Teaching>(`${evaluation(attemptId)}/teaching`)
+  },
+
+  getAttemptTranscript(attemptId: string): Promise<AttemptTranscript> {
+    return http.get<AttemptTranscript>(`${evaluation(attemptId)}/transcript`)
+  },
+
+  // ---------- Relecture des corrections (enseignants) ----------
+
+  getCaseAttempts(caseId: number): Promise<CaseAttemptRow[]> {
+    return http.get<CaseAttemptRow[]>(`/authoring/cases/${caseId}/attempts`)
+  },
+
+  getAttemptReview(attemptId: string): Promise<AttemptReview> {
+    return http.get<AttemptReview>(`${evaluation(attemptId)}/review`)
+  },
+
+  updateEvaluationItem(
+    attemptId: string, itemId: string, change: { points_awarded: number; justification: string },
+  ): Promise<EvaluationEnvelope> {
+    return http.patch<EvaluationEnvelope>(`${evaluation(attemptId)}/items/${encodeURIComponent(itemId)}`, change)
+  },
+
+  reevaluateAttempt(attemptId: string): Promise<EvaluationEnvelope> {
+    return http.post<EvaluationEnvelope>(`${evaluation(attemptId)}/reevaluate`, undefined, { timeout: LONG_TIMEOUT_MS })
+  },
 }
-
-export interface User {
-  id: number;
-  username: string;
-  fullName: string;
-  email: string;
-  role: string;
-}
-
-export interface ClinicalCase {
-  id: number;
-  title: string;
-  station_type: string;
-  duration_seconds: number;
-  status: string;
-  student_instructions?: string;
-  disciplines: string[];
-  edn_codes: number[];
-  has_evaluation_grid: boolean;
-}
-
-export interface Attempt {
-  id: string;
-  case_id: number;
-  created_at: string;
-  is_completed: boolean;
-}
-
-export interface TimeRemaining {
-  seconds_remaining: number | null;
-  is_expired: boolean;
-  message?: string;
-}
-
-export interface CaseInstructions {
-  case_id: number;
-  title: string;
-  student_instructions: string;
-  duration_seconds: number;
-  station_type: string;
-}
-
-export const stationType : Record<string, string> = {
-    "patient_interview": "Interrogatoire patient",
-    "exam_analysis": "Analyse d'examens (radio, ECG, labo)",
-    "procedure": "Démonstration de geste technique",
-    "diagnosis_announcement": "Annonce de diagnostic",
-    "mixed": "Station mixte (ex: interrogatoire puis examen)"
-};
-
-class ApiService {
-  constructor() {
-    // Le token est maintenant géré par les cookies HttpOnly
-    // Plus besoin de localStorage
-  }
-
-  private async request<T>(
-    endpoint: string,
-    options: RequestInit = {}
-  ): Promise<T> {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      ...(options.headers as Record<string, string> || {}),
-    };
-
-    // credentials: 'include' permet d'envoyer les cookies avec chaque requête
-    const response = await fetch(`${API_BASE_URL}${endpoint}`, {
-      ...options,
-      headers,
-      credentials: 'include',
-    });
-
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: 'Erreur réseau' }));
-      throw new Error(error.detail || `Erreur ${response.status}`);
-    }
-
-    return response.json();
-  }
-
-  async login(credentials: LoginCredentials): Promise<AuthResponse> {
-    // OAuth2 attend form-data, pas JSON
-    const formData = new URLSearchParams();
-    formData.append('username', credentials.username);
-    formData.append('password', credentials.password);
-
-    const response = await fetch(`${API_BASE_URL}/auth/token`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/x-www-form-urlencoded',
-      },
-      body: formData,
-      credentials: 'include', // Important: permet de recevoir et stocker le cookie
-    });
-
-    if (!response.ok) {
-      const error = await response.json().catch(() => ({ detail: 'Erreur réseau' }));
-      throw new Error(error.detail || 'Échec de la connexion');
-    }
-
-    const data = await response.json();
-    // Le token est maintenant dans un cookie HttpOnly, pas besoin de le stocker
-    return data;
-  }
-
-  async getCurrentUser(): Promise<User> {
-    return this.request<User>('/api/users/me');
-  }
-
-  async getClinicalCases(filters?: {
-    station_type?: string;
-    discipline?: string;
-  }): Promise<ClinicalCase[]> {
-    const params = new URLSearchParams();
-    if (filters?.station_type) params.append('station_type', filters.station_type);
-    if (filters?.discipline) params.append('discipline', filters.discipline);
-    
-    const queryString = params.toString();
-    const endpoint = `/api/cases${queryString ? `?${queryString}` : ''}`;
-    
-    return this.request<ClinicalCase[]>(endpoint);
-  }
-
-  async getClinicalCase(id: number): Promise<ClinicalCase> {
-    return this.request<ClinicalCase>(`/api/cases/${id}`);
-  }
-
-  async getCaseInstructions(id: number | null): Promise<CaseInstructions> {
-    return this.request<CaseInstructions>(`/api/cases/${id}/instructions`);
-  }
-
-  async getActiveAttempt(caseId: number): Promise<Attempt | null> {
-    try {
-      return await this.request<Attempt>(`/chat/cases/${caseId}/active-attempt`);
-    } catch (error) {
-      // Si 404 ou autre erreur, pas d'attempt actif
-      return null;
-    }
-  }
-
-  async createAttempt(caseId: number): Promise<Attempt> {
-    return this.request<Attempt>('/chat/attempts', {
-      method: 'POST',
-      body: JSON.stringify({ case_id: caseId }),
-    });
-  }
-
-  async getTimeRemaining(attemptId: string): Promise<TimeRemaining> {
-    return this.request<TimeRemaining>(`/chat/attempts/${attemptId}/time-remaining`);
-  }
-
-  async logout() {
-    // Appel au backend pour supprimer le cookie
-    try {
-      await this.request('/auth/logout', {
-        method: 'POST',
-      });
-    } catch (error) {
-      console.error('Erreur lors de la déconnexion:', error);
-    }
-  }
-
-  async getAttemptEvaluation(attemptId: string): Promise<any> {
-    return this.request<any>(`/evaluation/attempts/${attemptId}/evaluate`, {
-      method: 'POST',
-    });
-  }
-
-  async getAttemptTeaching(attemptId: string): Promise<any> {
-    return this.request<any>(`/evaluation/attempts/${attemptId}/teaching`);
-  }
-
-  async getAttemptTranscript(attemptId: string): Promise<any> {
-    return this.request<any>(`/evaluation/attempts/${attemptId}/transcript`);
-  }
-}
-
-export const apiService = new ApiService();

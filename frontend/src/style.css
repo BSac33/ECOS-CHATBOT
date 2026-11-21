@@ -1,13 +1,13 @@
 :root {
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
     Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
-  
-  /* Force le mode clair par défaut */
+
+  /* Mode clair forcé */
   color: #213547;
   background-color: #ffffff;
 }
 
-/* reset layout webapp */
+/* Mise en page : l'application occupe la fenêtre, le défilement se fait dans .main-view */
 html, body, #app {
   height: 100%;
   width: 100%;
@@ -16,12 +16,10 @@ html, body, #app {
 }
 
 body {
-  overflow: hidden;     /* pas de scroll global */
   font-family: inherit;
   color: #213547;
 }
 
-/* IMPORTANT : enlever le style "template Vite" */
 #app {
   max-width: none !important;
   padding: 0 !important;
@@ -30,23 +28,24 @@ body {
   background-color: #ffffff;
 }
 
-/* Force PrimeVue à suivre */
 body, .p-component {
   font-family: inherit;
 }
 
+/* Liens : contraste ≥ 4,5:1 et soulignés (pas seulement la couleur) */
 a {
   font-weight: 500;
-  color: #646cff;
-  text-decoration: inherit;
+  color: #3730a3;
+  text-decoration: underline;
+  text-underline-offset: 0.15em;
 }
 a:hover {
-  color: #535bf2;
+  color: #312e81;
 }
 
 h1 {
-  font-size: 3.2em;
-  line-height: 1.1;
+  font-size: 1.9rem;
+  line-height: 1.2;
 }
 
 button {
@@ -62,17 +61,43 @@ button {
   color: #213547;
 }
 button:hover {
-  border-color: #646cff;
-}
-button:focus,
-button:focus-visible {
-  outline: 4px auto -webkit-focus-ring-color;
+  border-color: #3730a3;
 }
 
-.card {
-  padding: 2em;
+/* Focus clavier toujours visible */
+:focus-visible {
+  outline: 3px solid #1d4ed8;
+  outline-offset: 2px;
 }
 
-/* Media query supprimé - mode clair forcé par défaut */
+/* Texte réservé aux lecteurs d'écran */
+.sr-only {
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
+  clip: rect(0, 0, 0, 0) !important;
+  white-space: nowrap !important;
+  border: 0 !important;
+}
 
+/* Mention de transparence (IA) */
+.ai-notice {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  color: #3730a3;
+}
 
+/* Animations réduites si l'utilisateur le demande */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
