@@ -1,9 +1,14 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [vue()],
+  test: {
+    environment: 'jsdom',
+    include: ['src/**/*.test.ts'],
+  },
   server: {
     host: '0.0.0.0',
     port: 5173,
@@ -14,11 +19,12 @@ export default defineConfig({
       host: 'localhost',
     },
     proxy: {
-      // Rediriger toutes les requêtes commençant par /api vers le backend
+      // API sous /api : préfixe retiré, comme nginx en production (/api/chat/attempts -> /chat/attempts)
       // Utilise 'fastapi' (nom du service Docker) au lieu de 'localhost'
       '/api': {
         target: 'http://fastapi:8000',
         changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api/, ''),
       },
       // Rediriger UNIQUEMENT les routes API du chat (pas les routes frontend Vue)
       // Routes backend: /chat/attempts (pas /chat/:attemptId qui est une route Vue)
@@ -26,26 +32,6 @@ export default defineConfig({
         target: 'http://fastapi:8000',
         changeOrigin: true,
         ws: true, // mode vocal : WebSocket /chat/attempts/{id}/voice
-      },
-      // Rediriger les requêtes /auth vers le backend
-      '/auth': {
-        target: 'http://fastapi:8000',
-        changeOrigin: true,
-      },
-      // Rediriger les requêtes /evaluation vers le backend
-      '/evaluation': {
-        target: 'http://fastapi:8000',
-        changeOrigin: true,
-      },
-      // Atelier de création de stations (enseignants)
-      '/authoring': {
-        target: 'http://fastapi:8000',
-        changeOrigin: true,
-      },
-      // Rediriger les requêtes /admin vers le backend
-      '/admin': {
-        target: 'http://fastapi:8000',
-        changeOrigin: true,
       },
       // Rediriger les téléchargements de documents (examens affichés par l'examinateur)
       '/attachments': {

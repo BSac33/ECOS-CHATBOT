@@ -15,6 +15,14 @@ export interface SSEMessage {
   data: unknown;
 }
 
+/** Aucun octet reçu pendant le délai d'inactivité : le flux est abandonné. */
+export class SSETimeoutError extends Error {
+  constructor(message = 'Pas de réponse du serveur depuis un moment. Réessayez.') {
+    super(message);
+    this.name = 'SSETimeoutError';
+  }
+}
+
 /**
  * Découpe un tampon texte en événements SSE complets.
  * Retourne les événements trouvés et le reste (événement incomplet).
@@ -48,13 +56,38 @@ export function parseSSEChunk(buffer: string): { events: SSEMessage[]; rest: str
   return { events, rest };
 }
 
+export interface ReadSSEOptions {
+  /** Abandon si aucun octet n'arrive pendant ce délai (ms). Désactivé si absent. */
+  idleTimeoutMs?: number;
+  /** Message de l'erreur de délai */
+  timeoutMessage?: string;
+}
+
+async function readChunk(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  options: ReadSSEOptions,
+): Promise<ReadableStreamReadResult<Uint8Array>> {
+  const { idleTimeoutMs } = options;
+  if (!idleTimeoutMs) return reader.read();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new SSETimeoutError(options.timeoutMessage)), idleTimeoutMs);
+  });
+  try {
+    return await Promise.race([reader.read(), timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /**
  * Consomme le corps d'une réponse SSE et appelle onEvent pour chaque événement.
- * Se termine quand le serveur ferme le flux.
+ * Se termine quand le serveur ferme le flux ; lève SSETimeoutError si le flux reste muet.
  */
 export async function readSSE(
   response: Response,
   onEvent: (message: SSEMessage) => void,
+  options: ReadSSEOptions = {},
 ): Promise<void> {
   if (!response.body) {
     throw new Error('Réponse sans corps : streaming non supporté');
@@ -63,13 +96,19 @@ export async function readSSE(
   const decoder = new TextDecoder();
   let buffer = '';
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const { events, rest } = parseSSEChunk(buffer);
-    buffer = rest;
-    events.forEach(onEvent);
+  try {
+    while (true) {
+      const { value, done } = await readChunk(reader, options);
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const { events, rest } = parseSSEChunk(buffer);
+      buffer = rest;
+      events.forEach(onEvent);
+    }
+  } catch (error) {
+    // Flux abandonné (délai, coupure) : on libère la connexion
+    reader.cancel().catch(() => {});
+    throw error;
   }
 
   buffer += decoder.decode();

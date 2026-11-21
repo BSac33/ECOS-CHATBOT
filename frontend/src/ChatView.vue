@@ -1,10 +1,14 @@
 <template>
-    <div style="display:flex; min-height:0; flex-direction: column; height:100%">
-        <!-- Header fixe avec timer et bouton Stop -->
-        <ChatHeader :attempt-id="attemptId" />
+    <div class="chat-view">
+        <!-- En-tête : titre, mention IA, minuteur, bouton Terminer -->
+        <ChatHeader
+            ref="header"
+            :attempt-id="attemptId"
+            :title="caseTitle"
+            :interlocutor="noInterlocutor ? 'aucun' : interlocutor"
+        />
 
-        <!-- Container principal avec messages et textbox -->
-        <div style="display:flex; min-height:0; gap:1rem; flex-direction: column; padding:1rem; flex: 1;">
+        <div class="chat-body">
             <!-- Consultation orale : pas de texte par défaut, la transcription reste enregistrée -->
             <VoiceConsultation
                 v-if="consulting"
@@ -21,52 +25,65 @@
                 @leave="leaveConsultation"
             />
 
-            <!-- Container des messages avec scroll automatique -->
-            <div 
-                v-show="!consulting || showTranscript"
-                id="message-container" 
-                ref="messageContainer"
-                style="display: flex; flex-direction: column; min-height: 0; flex:1; overflow-y: auto; padding: .5rem;"
-            >
-                <!-- État de chargement initial -->
-                <div v-if="isLoading" style="text-align: center; padding: 2rem; color: #6c757d;">
-                    <p>Chargement de la conversation...</p>
-                </div>
+            <Message v-if="loadError" severity="error" :closable="false" class="load-error">
+                <span>{{ loadError }}</span>
+                <Button label="Réessayer" icon="pi pi-refresh" size="small" text @click="loadMessages" />
+            </Message>
 
-                <!-- Liste des messages -->
-                <Message 
-                    v-for="message in messages" 
-                    :key="message.id" 
-                    :message="message" 
+            <!-- Conversation : annoncée au fil de l'eau par les lecteurs d'écran -->
+            <div
+                v-show="!consulting || showTranscript"
+                id="message-container"
+                ref="messageContainer"
+                class="message-container"
+                role="log"
+                aria-live="polite"
+                aria-label="Conversation"
+                :aria-busy="conversationBusy"
+                tabindex="0"
+            >
+                <p v-if="isLoading" class="loading">Chargement de la conversation…</p>
+
+                <ChatBubble
+                    v-for="message in messages"
+                    :key="message.id"
+                    :message="message"
+                    :interlocutor="interlocutorLabel"
+                    :retry-disabled="isSendingMessage || stationOver"
+                    @retry="retryMessage"
                 />
 
-                <!-- Indicateur de frappe (optionnel) -->
-                <div v-if="isPatientTyping" class="typing-indicator">
+                <div v-if="isPatientTyping" class="typing-indicator" aria-hidden="true">
                     <span></span>
                     <span></span>
                     <span></span>
                 </div>
             </div>
+            <p class="sr-only" role="status">{{ typingStatus }}</p>
 
             <!-- Le patient parle : possibilité de lui couper la parole -->
             <div v-if="isPatientSpeaking && !consulting" class="speaking-bar">
-                <i class="pi pi-volume-up"></i>
-                <span>{{ interlocutorLabel === 'Patiente' ? 'La patiente' : interlocutorLabel === 'Patient' ? 'Le patient' : interlocutorLabel }} parle…</span>
+                <i class="pi pi-volume-up" aria-hidden="true"></i>
+                <span>{{ subject }} parle…</span>
                 <Button label="Couper" size="small" text severity="secondary" @click="voice.interrupt()" />
             </div>
 
             <!-- Station sans interlocuteur : rappel de la consigne -->
             <div v-if="noInterlocutor && !consulting" class="silent-hint">
-                <i class="pi pi-info-circle"></i>
+                <i class="pi pi-info-circle" aria-hidden="true"></i>
                 Station sans interlocuteur : exposez votre raisonnement à voix haute ou par écrit. Les examinateurs vous écoutent sans intervenir.
             </div>
 
+            <p v-if="stationOver" class="station-over" role="alert">{{ EXPIRED_MESSAGE }}</p>
+
             <!-- Saisie : clavier ou voix -->
             <div v-if="!consulting" class="input-row">
-                <Textbox 
-                    style="padding:.5rem; flex: 1;" 
+                <Textbox
+                    v-model="draft"
+                    class="input-box"
+                    :max-length="MAX_MESSAGE_LENGTH"
+                    :disabled="isSendingMessage || voiceState !== 'idle' || stationOver"
                     @send-message="handleSendMessage"
-                    :disabled="isSendingMessage || voiceState !== 'idle'"
                 />
                 <Button
                     class="mic-button"
@@ -74,8 +91,9 @@
                     :icon="micIcon"
                     :severity="voiceState === 'recording' ? 'danger' : 'secondary'"
                     :loading="voiceState === 'connecting' || voiceState === 'transcribing'"
-                    :disabled="isSendingMessage"
+                    :disabled="isSendingMessage || stationOver"
                     :aria-label="micLabel"
+                    :aria-pressed="voiceState === 'recording'"
                     :title="micLabel"
                     @click="toggleTalking"
                 />
@@ -84,7 +102,7 @@
                     icon="pi pi-headphones"
                     severity="secondary"
                     outlined
-                    :disabled="isSendingMessage || voiceState !== 'idle'"
+                    :disabled="isSendingMessage || voiceState !== 'idle' || stationOver"
                     aria-label="Consultation orale (mains libres)"
                     title="Consultation orale : parlez librement au patient, sans bouton ni texte"
                     @click="startConsultation"
@@ -96,69 +114,26 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue';
-import { useRoute } from 'vue-router';
 import Button from 'primevue/button';
+import Message from 'primevue/message';
+import { useToast } from 'primevue/usetoast';
 import ChatHeader from './components/ChatHeader.vue';
-import Message from './components/Message.vue';
+import ChatBubble from './components/Message.vue';
 import Textbox from './components/Textbox.vue';
-import { readSSE } from './services/sse';
 import VoiceConsultation, { type ConsultationStatus } from './components/VoiceConsultation.vue';
 import { VoiceClient, type VoiceEvent } from './services/voice';
+import { apiService } from './services/api';
+import { ApiError, errorMessage } from './services/http';
+import { EXPIRED_MESSAGE, MAX_MESSAGE_LENGTH, streamChatTurn } from './services/chat';
+import type { ChatMessage, ChatResponse, ExaminerNote, Interlocutor } from './types';
 
-// ============= INTERFACES =============
-
-/**
- * Interface correspondant au format de message du backend
- * Compatible avec le composant Message.vue
- */
-interface ChatMessage {
-    id: string;
-    role: 'student' | 'patient' | 'system' | 'examiner';
-    content: string;
-    created_at: string;
-    attachment_id?: string | null;
-    attachment_mime_type?: string | null;
-    // "text" ou "voice"
-    modality?: string;
-    // Message étudiant refusé par les garde-fous (non transmis au patient)
-    blocked?: boolean;
-    // Transcription vocale en cours
-    pending?: boolean;
-    // Identifiant en base (les messages ajoutés en direct ont un id temporaire)
-    server_id?: string | null;
-    // Réplique du patient coupée par l'étudiant
-    interrupted_by?: string | null;
-    spoken_content?: string | null;
-}
-
-/**
- * Information transmise par l'examinateur (résultats d'examen, document affiché)
- */
-interface ExaminerNote {
-    kind: 'exam_findings' | 'document';
-    title: string;
-    content: string;
-    attachment_id?: string | null;
-    file_url?: string | null;
-    mime_type?: string | null;
-}
-
-/**
- * Fin d'un tour (événement "done") : réponse complète telle qu'enregistrée
- */
-interface ChatResponse {
-    patient_reply: string;
-    attachments?: string[];
-    blocked?: boolean;
-    examiner_notes?: ExaminerNote[];
-    patient_message_id?: string | null;
-    /** Station sans interlocuteur : la parole de l'étudiant est enregistrée, personne ne répond */
-    silent?: boolean;
-}
+const props = defineProps<{ attemptId: string }>();
+const attemptId = props.attemptId;
+const toast = useToast();
 
 /**
  * Convertit une note de l'examinateur au même format que les messages
- * "examiner" renvoyés par GET /messages (rechargement de la page)
+ * « examiner » renvoyés par GET /messages (rechargement de la page)
  */
 function examinerNoteToMessage(note: ExaminerNote): ChatMessage {
     const content = note.kind === 'document'
@@ -174,39 +149,37 @@ function examinerNoteToMessage(note: ExaminerNote): ChatMessage {
     };
 }
 
-// ============= STATE RÉACTIF =============
+// ============= ÉTAT =============
 
-const route = useRoute();
-const attemptId = route.params.attemptId as string;
-
-/**
- * Référence au container DOM pour le scroll automatique
- */
+const header = ref<InstanceType<typeof ChatHeader> | null>(null);
 const messageContainer = ref<HTMLElement | null>(null);
-
-/**
- * Array réactive contenant tous les messages de la conversation
- * Alimentée par le fetch initial puis par les mises à jour optimistes
- */
 const messages = ref<ChatMessage[]>([]);
+const draft = ref('');
 
-/**
- * Indicateurs d'état pour l'UI
- */
 const isLoading = ref(true);
+const loadError = ref<string | null>(null);
 const isSendingMessage = ref(false);
 const isPatientTyping = ref(false);
+/** Temps écoulé (réponse 410) : plus d'envoi possible */
+const stationOver = ref(false);
+
+const caseTitle = ref('');
+const interlocutor = ref<Interlocutor>('patient');
 /** Station sans patient ni professionnel simulé : l'étudiant parle seul devant les examinateurs */
-const noInterlocutor = ref(false);
+const noInterlocutor = computed(() => interlocutor.value === 'aucun');
 /** « Patient », « Patiente » ou rôle du professionnel de santé simulé */
 const interlocutorLabel = ref('Patient');
+const subject = computed(() => {
+    if (interlocutorLabel.value === 'Patiente') return 'La patiente';
+    if (interlocutorLabel.value === 'Patient') return 'Le patient';
+    return interlocutorLabel.value;
+});
 
-// ============= FONCTIONS UTILITAIRES =============
+/** Annulation des envois en cours si l'on quitte la page */
+const pageController = new AbortController();
 
-/**
- * Scroll automatique vers le bas du container de messages
- * Utilise nextTick pour attendre que le DOM soit mis à jour
- */
+// ============= OUTILS =============
+
 async function scrollToBottom() {
     await nextTick();
     if (messageContainer.value) {
@@ -214,9 +187,7 @@ async function scrollToBottom() {
     }
 }
 
-/**
- * Ajoute un message et renvoie son proxy réactif (pour le modifier ensuite)
- */
+/** Ajoute un message et renvoie son proxy réactif (pour le modifier ensuite) */
 function pushMessage(message: ChatMessage): ChatMessage {
     messages.value.push(message);
     return messages.value[messages.value.length - 1]!;
@@ -231,36 +202,32 @@ function pushNotice(content: string) {
     scrollToBottom();
 }
 
-/**
- * Charge l'historique complet des messages depuis le backend
- * Appelée au montage du composant
- */
+function showError(summary: string, error: unknown) {
+    toast.add({ severity: 'error', summary, detail: errorMessage(error), life: 8000 });
+}
+
 async function loadMessages() {
+    isLoading.value = true;
+    loadError.value = null;
     try {
-        isLoading.value = true;
-        
-        // Appel API : GET /chat/attempts/{attemptId}/messages
-        const response = await fetch(`/chat/attempts/${attemptId}/messages`, {
-            credentials: 'include'
-        });
-        
-        if (!response.ok) {
-            throw new Error('Erreur lors du chargement des messages');
-        }
-        
-        const data: ChatMessage[] = await response.json();
-        
-        // Stocker les messages dans l'array réactive
-        messages.value = data;
-        
-        // Scroll automatique après le chargement
+        messages.value = await apiService.getMessages(attemptId);
         await scrollToBottom();
-        
     } catch (error) {
-        console.error('Erreur lors du chargement des messages:', error);
-        // TODO: Afficher un message d'erreur à l'utilisateur
+        loadError.value = `Impossible de charger la conversation. ${errorMessage(error)}`;
     } finally {
         isLoading.value = false;
+    }
+}
+
+async function loadStationInfo() {
+    try {
+        const info = await apiService.getAttemptCaseInfo(attemptId);
+        caseTitle.value = info.title;
+        interlocutor.value = info.interlocutor ?? 'patient';
+        interlocutorLabel.value = info.interlocutor_label || 'Patient';
+    } catch {
+        // information facultative : comportement par défaut (avec patient)
+        caseTitle.value = 'Station';
     }
 }
 
@@ -320,9 +287,11 @@ function startTurn(studentMessageId: string, modality: 'text' | 'voice'): Turn {
             isPatientTyping.value = false;
             if (final.silent) {
                 // Personne ne répond : seule la parole de l'étudiant est enregistrée
+                pendingNotes.forEach(add);
+                pendingNotes = [];
             } else if (final.blocked) {
-                // Le message n'entre pas dans le transcript : on le marque comme non transmis
-                // et on affiche l'avertissement comme message système (hors personnage).
+                // Le message n'entre pas dans le transcript : marqué comme non transmis,
+                // avertissement affiché comme message système (hors personnage)
                 const sent = messages.value.find(m => m.id === studentMessageId);
                 if (sent) sent.blocked = true;
                 add({ id: crypto.randomUUID(), role: 'system', content: final.patient_reply, created_at: new Date().toISOString() });
@@ -343,87 +312,63 @@ function startTurn(studentMessageId: string, modality: 'text' | 'voice'): Turn {
 
 // ============= MODE ÉCRIT (SSE) =============
 
-/**
- * Gère l'envoi d'un nouveau message depuis le composant Textbox
- * La réplique du patient arrive en flux (SSE) et s'affiche au fil de l'eau
- * 
- * @param messageContent - Le contenu du message saisi par l'étudiant
- */
-async function handleSendMessage(messageContent: string) {
-    if (!messageContent.trim() || isSendingMessage.value) {
-        return;
-    }
-    
-    let turn: Turn | null = null;
+const isStreaming = ref(false);
+
+async function sendText(content: string) {
+    if (!content.trim() || isSendingMessage.value || stationOver.value) return;
+    isSendingMessage.value = true;
+    // Le texte remis dans la saisie est renvoyé : l'ancienne bulle « Non envoyé » disparaît
+    removeMessages(messages.value.filter(m => m.failed && m.content === content).map(m => m.id));
+
+    // Mise à jour optimiste
+    const studentMessage = pushMessage({
+        id: crypto.randomUUID(),
+        role: 'student',
+        content,
+        created_at: new Date().toISOString(),
+        modality: 'text',
+    });
+    await scrollToBottom();
+    isPatientTyping.value = !noInterlocutor.value;
+
+    // Rempli par les rappels du flux
+    const current: { turn: Turn | null } = { turn: null };
     try {
-        isSendingMessage.value = true;
-        
-        // ===== MISE À JOUR OPTIMISTE =====
-        const studentMessage = pushMessage({
-            id: crypto.randomUUID(), // ID temporaire
-            role: 'student',
-            content: messageContent,
-            created_at: new Date().toISOString(),
-            modality: 'text',
-        });
-        await scrollToBottom();
-        
-        isPatientTyping.value = true;
-        
-        // POST /chat/attempts/{attemptId}/chat/stream
-        const response = await fetch(`/chat/attempts/${attemptId}/chat/stream`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'text/event-stream'
-            },
-            credentials: 'include',
-            body: JSON.stringify({ message: messageContent })
-        });
-        
-        // Les erreurs de validation (temps écoulé, tentative terminée...) restent des erreurs HTTP
-        if (!response.ok) {
-            const error = await response.json().catch(() => ({ detail: 'Erreur réseau' }));
-            throw new Error(error.detail || 'Erreur lors de l\'envoi du message');
-        }
-        
-        turn = startTurn(studentMessage.id, 'text');
-        const current = turn;
-        let finished = false;
-        let streamError: string | null = null;
-        
-        await readSSE(response, ({ event, data }) => {
-            switch (event) {
-                case 'delta':
-                    current.delta((data as { text: string }).text);
-                    break;
-                case 'examiner_note':
-                    current.note(data as ExaminerNote);
-                    break;
-                case 'done':
-                    current.done(data as ChatResponse);
-                    finished = true;
-                    break;
-                case 'error':
-                    streamError = (data as { message?: string }).message ?? 'Erreur du patient simulé';
-                    break;
-            }
-        });
-        
-        // Échec ou flux coupé : rien n'a été enregistré, on retire la réponse partielle
-        if (!finished) {
-            current.fail();
-            throw new Error(streamError ?? 'La connexion a été interrompue avant la fin de la réponse');
-        }
-        
+        isStreaming.value = true;
+        const final = await streamChatTurn(attemptId, content, {
+            onStart: () => { current.turn = startTurn(studentMessage.id, 'text'); },
+            onDelta: (text) => current.turn?.delta(text),
+            onNote: (note) => current.turn?.note(note),
+        }, { signal: pageController.signal });
+        (current.turn ?? startTurn(studentMessage.id, 'text')).done(final);
     } catch (error) {
-        console.error('Erreur lors de l\'envoi du message:', error);
-        alert(`Erreur: ${error instanceof Error ? error.message : 'Erreur inconnue'}`);
-        
+        current.turn?.fail();
+        if (pageController.signal.aborted) return;
+        // Le message n'a pas été transmis : marqué « Non envoyé », texte remis dans la saisie
+        studentMessage.failed = true;
+        if (!draft.value.trim()) draft.value = content;
+        if (error instanceof ApiError && (error.status === 410 || error.status === 408)) {
+            stationOver.value = true;
+            void header.value?.expire();
+        } else {
+            showError('Message non envoyé', error);
+        }
     } finally {
+        isStreaming.value = false;
         isSendingMessage.value = false;
         isPatientTyping.value = false;
     }
+}
+
+function handleSendMessage(content: string) {
+    void sendText(content);
+}
+
+function retryMessage(message: ChatMessage) {
+    if (isSendingMessage.value) return;
+    removeMessages([message.id]);
+    if (draft.value.trim() === message.content.trim()) draft.value = '';
+    void sendText(message.content);
 }
 
 // ============= MODE VOCAL (appuyer pour parler) =============
@@ -461,6 +406,11 @@ const consultationStatus = computed<ConsultationStatus>(() => {
     return 'listening';
 });
 
+/** La conversation change encore : les lecteurs d'écran attendent la fin pour l'annoncer */
+const conversationBusy = computed(() =>
+    isStreaming.value || isPatientTyping.value || !!speakingStudent.value || awaitingVoice.value);
+const typingStatus = computed(() => (isPatientTyping.value ? `${subject.value} répond…` : ''));
+
 const examinerNotes = computed(() => messages.value.filter(m => m.role === 'examiner'));
 
 voice.onLevel = (level) => { micLevel.value = micLevel.value * 0.5 + level * 0.5; };
@@ -473,8 +423,7 @@ async function startConsultation() {
         await voice.startConversation();
     } catch (error) {
         consulting.value = false;
-        const reason = error instanceof Error ? error.message : 'erreur inconnue';
-        alert(`Consultation orale indisponible : ${reason}`);
+        showError('Consultation orale indisponible', error);
     } finally {
         consultationConnecting.value = false;
     }
@@ -521,20 +470,12 @@ async function toggleTalking() {
     try {
         voiceState.value = 'connecting';
         await voice.startTalking();
-        speakingStudent.value = pushMessage({
-            id: crypto.randomUUID(),
-            role: 'student',
-            content: '',
-            created_at: new Date().toISOString(),
-            modality: 'voice',
-            pending: true,
-        });
+        speakingStudent.value = newPendingStudent();
         voiceState.value = 'recording';
         scrollToBottom();
     } catch (error) {
         voiceState.value = 'idle';
-        const reason = error instanceof Error ? error.message : 'erreur inconnue';
-        alert(`Mode vocal indisponible : ${reason}`);
+        showError('Mode vocal indisponible', error);
     }
 }
 
@@ -549,12 +490,17 @@ function newPendingStudent(): ChatMessage {
     });
 }
 
+function eventText(event: VoiceEvent, key: string): string {
+    const value = event[key];
+    return typeof value === 'string' ? value : '';
+}
+
 function handleVoiceEvent(event: VoiceEvent) {
     switch (event.type) {
         case 'transcript_partial':
             // En mains libres, c'est le serveur qui détecte le début d'une phrase
             speakingStudent.value ??= newPendingStudent();
-            speakingStudent.value.content = event.text as string;
+            speakingStudent.value.content = eventText(event, 'text');
             scrollToBottom();
             break;
         case 'transcript_final': {
@@ -562,7 +508,7 @@ function handleVoiceEvent(event: VoiceEvent) {
             const student = speakingStudent.value;
             speakingStudent.value = null;
             if (!student) break;
-            const text = (event.text as string) || '';
+            const text = eventText(event, 'text');
             if (!text) {
                 removeMessages([student.id]);
                 pushNotice("Je n'ai rien entendu. Vérifiez votre micro et réessayez.");
@@ -587,7 +533,7 @@ function handleVoiceEvent(event: VoiceEvent) {
             break;
         }
         case 'delta':
-            voiceTurns[0]?.turn.delta(event.text as string);
+            voiceTurns[0]?.turn.delta(eventText(event, 'text'));
             break;
         case 'examiner_note':
             voiceTurns[0]?.turn.note(event as unknown as ExaminerNote);
@@ -610,19 +556,21 @@ function handleVoiceEvent(event: VoiceEvent) {
             // Coupure de parole enregistrée (comptée dans la correction)
             const cut = messages.value.find(m => (m.server_id ?? m.id) === event.message_id);
             if (cut) {
-                cut.interrupted_by = event.reason as string;
-                cut.spoken_content = event.spoken_content as string;
+                cut.interrupted_by = eventText(event, 'reason');
+                cut.spoken_content = eventText(event, 'spoken_content');
             }
             break;
         }
-        case 'voice_unavailable':
+        case 'voice_unavailable': {
+            const message = eventText(event, 'message') || 'La voix du patient est indisponible.';
             awaitingVoice.value = false;
-            consultationNotice.value = event.message as string;
-            if (!voiceUnavailableShown) pushNotice(event.message as string);
+            consultationNotice.value = message;
+            if (!voiceUnavailableShown) pushNotice(message);
             voiceUnavailableShown = true;
             break;
+        }
         case 'error': {
-            const message = (event.message as string) || 'Erreur du mode vocal';
+            const message = eventText(event, 'message') || 'Erreur du mode vocal.';
             if (speakingStudent.value) {
                 // La transcription a échoué : rien n'a été envoyé
                 removeMessages([speakingStudent.value.id]);
@@ -654,37 +602,64 @@ function handleVoiceEvent(event: VoiceEvent) {
     }
 }
 
-// ============= LIFECYCLE HOOKS =============
-
-/**
- * Au montage du composant :
- * 1. Charger l'historique des messages
- * 2. Initialiser le scroll en bas de page
- */
-async function loadStationInfo() {
-    try {
-        const response = await fetch(`/chat/attempts/${attemptId}/case-info`, { credentials: 'include' });
-        if (response.ok) {
-            const info = await response.json();
-            noInterlocutor.value = info.interlocutor === 'aucun';
-            interlocutorLabel.value = info.interlocutor_label || 'Patient';
-        }
-    } catch {
-        // information facultative : comportement par défaut (avec patient)
-    }
-}
+// ============= CYCLE DE VIE =============
 
 onMounted(async () => {
     await Promise.all([loadMessages(), loadStationInfo()]);
 });
 
 onBeforeUnmount(() => {
+    pageController.abort();
     voice.close();
 });
-
 </script>
 
 <style scoped>
+.chat-view {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    height: 100%;
+}
+
+.chat-body {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    padding: 1rem;
+    flex: 1;
+    min-height: 0;
+}
+
+.message-container {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    /* Toujours une zone de lecture, même au zoom 200 % : la page défile alors */
+    min-height: 12rem;
+    overflow-y: auto;
+    padding: 0.5rem;
+    scroll-behavior: smooth;
+}
+
+.message-container:focus-visible {
+    outline: 3px solid #1d4ed8;
+    outline-offset: 2px;
+}
+
+.loading {
+    text-align: center;
+    padding: 2rem;
+    color: #4b5563;
+}
+
+.load-error :deep(.p-message-text) {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+}
+
 .silent-hint {
     display: flex;
     gap: .5rem;
@@ -696,7 +671,16 @@ onBeforeUnmount(() => {
     font-size: .9rem;
 }
 
-/* Animation de l'indicateur de frappe (typing indicator) */
+.station-over {
+    margin: 0;
+    padding: 0.5rem 0.75rem;
+    border-radius: 8px;
+    background: #343a40;
+    color: #ffffff;
+    font-weight: 600;
+}
+
+/* Indicateur « le patient écrit » */
 .typing-indicator {
     display: flex;
     align-items: center;
@@ -733,11 +717,17 @@ onBeforeUnmount(() => {
     }
 }
 
-/* Saisie : zone de texte + bouton micro */
+/* Saisie : zone de texte + boutons micro */
 .input-row {
     display: flex;
     align-items: center;
     gap: 0.5rem;
+}
+
+.input-box {
+    flex: 1;
+    min-width: 0;
+    padding: .5rem;
 }
 
 .mic-button {
@@ -755,35 +745,49 @@ onBeforeUnmount(() => {
     50% { box-shadow: 0 0 0 8px rgba(220, 53, 69, 0); }
 }
 
+@media (prefers-reduced-motion: reduce) {
+    .typing-indicator span,
+    .mic-button.recording {
+        animation: none;
+    }
+    .message-container {
+        scroll-behavior: auto;
+    }
+}
+
+@media (max-width: 640px) {
+    .chat-body {
+        padding: 0.5rem 0;
+    }
+    .input-row {
+        flex-wrap: wrap;
+    }
+    .input-box {
+        flex-basis: 100%;
+        padding: 0;
+    }
+}
+
 .speaking-bar {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     padding: 0 0.75rem;
-    color: #495057;
+    color: #374151;
     font-size: 0.9rem;
 }
 
-/* Style du container de messages */
-#message-container {
-    scroll-behavior: smooth;
-}
-
-#message-container::-webkit-scrollbar {
+.message-container::-webkit-scrollbar {
     width: 8px;
 }
 
-#message-container::-webkit-scrollbar-track {
+.message-container::-webkit-scrollbar-track {
     background: #f1f1f1;
     border-radius: 10px;
 }
 
-#message-container::-webkit-scrollbar-thumb {
+.message-container::-webkit-scrollbar-thumb {
     background: #888;
     border-radius: 10px;
-}
-
-#message-container::-webkit-scrollbar-thumb:hover {
-    background: #555;
 }
 </style>

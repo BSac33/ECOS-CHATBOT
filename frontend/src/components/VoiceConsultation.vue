@@ -5,7 +5,7 @@
             <div class="avatar-wrap" :class="{ speaking: status === 'speaking', thinking: status === 'thinking' }">
                 <span class="wave"></span>
                 <span class="wave delay"></span>
-                <div class="avatar"><i class="pi pi-user"></i></div>
+                <div class="avatar"><i class="pi pi-user" aria-hidden="true"></i></div>
             </div>
             <div class="patient-label">{{ props.who || 'Patient' }}</div>
 
@@ -27,13 +27,13 @@
 
         <!-- Avertissement hors personnage (message bloqué, voix indisponible...) -->
         <div v-if="notice" class="notice" role="alert">
-            <i class="pi pi-info-circle"></i>
+            <i class="pi pi-info-circle" aria-hidden="true"></i>
             <span>{{ notice }}</span>
         </div>
 
         <!-- Informations de l'examinateur : toujours visibles (constantes, ECG...) -->
         <div v-if="examinerNotes.length" class="examiner">
-            <h3>Informations de l'examinateur</h3>
+            <h2>Informations de l'examinateur</h2>
             <Message v-for="note in examinerNotes" :key="note.id" :message="note" />
         </div>
 
@@ -75,18 +75,9 @@
 import { computed } from 'vue';
 import Button from 'primevue/button';
 import Message from './Message.vue';
+import type { ChatMessage } from '../types';
 
 export type ConsultationStatus = 'connecting' | 'listening' | 'user_speaking' | 'thinking' | 'speaking';
-
-interface ChatMessage {
-    id: string;
-    role: 'student' | 'patient' | 'system' | 'examiner';
-    content: string;
-    created_at: string;
-    attachment_id?: string | null;
-    attachment_mime_type?: string | null;
-    modality?: string;
-}
 
 const props = defineProps<{
     /** Nom de l'interlocuteur (« Patient », « Cardiologue de garde »...) */
@@ -202,6 +193,19 @@ function barScale(i: number) {
     50% { transform: scale(1.04); }
 }
 
+@media (prefers-reduced-motion: reduce) {
+    .speaking .wave,
+    .thinking .avatar {
+        animation: none;
+    }
+    .speaking .wave {
+        opacity: 0.6;
+    }
+    .bar {
+        transition: none;
+    }
+}
+
 .patient-label {
     font-weight: 600;
     color: #1d3d5c;
@@ -210,7 +214,7 @@ function barScale(i: number) {
 .status {
     margin: 0;
     font-size: 1.05rem;
-    color: #495057;
+    color: #374151;
     min-height: 1.5rem;
 }
 
@@ -241,8 +245,8 @@ function barScale(i: number) {
 
 .hint {
     margin: 0;
-    font-size: 0.8rem;
-    color: #868e96;
+    font-size: 0.85rem;
+    color: #475569;
 }
 
 .notice {
@@ -256,7 +260,7 @@ function barScale(i: number) {
     font-size: 0.9rem;
 }
 
-.examiner h3 {
+.examiner h2 {
     margin: 0 0 0.5rem;
     font-size: 0.85rem;
     text-transform: uppercase;

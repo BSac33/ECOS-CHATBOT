@@ -13,6 +13,8 @@
  *   immédiatement sa voix (côté navigateur) et prévient le serveur.
  */
 
+import { websocketUrl } from './http';
+
 export const SAMPLE_RATE = 24000;
 const FRAME_SIZE = 1920;
 
@@ -58,6 +60,8 @@ export class VoiceClient {
   private ctx: AudioContext | null = null;
   private stream: MediaStream | null = null;
   private capture: AudioWorkletNode | null = null;
+  private source: MediaStreamAudioSourceNode | null = null;
+  private workletLoaded = false;
   private recording = false;
   private conversation = false;
   private muted = false;
@@ -87,9 +91,8 @@ export class VoiceClient {
     if (this.isConnected) return;
     this.ctx ??= new AudioContext({ sampleRate: SAMPLE_RATE });
 
-    const url = new URL(`/chat/attempts/${this.attemptId}/voice`, window.location.href);
-    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-    const ws = new WebSocket(url);
+    // Appel direct (sans /api) : nginx garde la connexion ouverte toute la station
+    const ws = new WebSocket(websocketUrl(`/chat/attempts/${encodeURIComponent(this.attemptId)}/voice`));
     ws.binaryType = 'arraybuffer';
     this.ws = ws;
 
@@ -109,8 +112,12 @@ export class VoiceClient {
     });
 
     ws.onclose = () => {
+      if (this.ws !== ws) return; // ancienne connexion, déjà remplacée
       this.recording = false;
       this.conversation = false;
+      this.ws = null;
+      // Plus de connexion : le micro est rendu (le navigateur n'affiche plus l'enregistrement)
+      this.releaseMic();
       this.onEvent({ type: 'closed' });
     };
   }
@@ -123,10 +130,14 @@ export class VoiceClient {
     this.stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, channelCount: 1 },
     });
-    const moduleUrl = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: 'application/javascript' }));
-    await ctx.audioWorklet.addModule(moduleUrl);
-    URL.revokeObjectURL(moduleUrl);
+    if (!this.workletLoaded) {
+      const moduleUrl = URL.createObjectURL(new Blob([CAPTURE_WORKLET], { type: 'application/javascript' }));
+      await ctx.audioWorklet.addModule(moduleUrl);
+      URL.revokeObjectURL(moduleUrl);
+      this.workletLoaded = true;
+    }
     const source = ctx.createMediaStreamSource(this.stream);
+    this.source = source;
     this.capture = new AudioWorkletNode(ctx, 'mic-capture');
     this.capture.port.onmessage = (e: MessageEvent<Float32Array<ArrayBuffer>>) => {
       const frame = e.data;
@@ -192,12 +203,27 @@ export class VoiceClient {
     this.recording = false;
     this.conversation = false;
     this.stopPlayback();
-    this.ws?.close();
-    this.ws = null;
-    this.stream?.getTracks().forEach((t) => t.stop());
-    this.stream = null;
+    if (this.ws) {
+      this.ws.onclose = null;
+      this.ws.close();
+      this.ws = null;
+    }
+    this.releaseMic();
     void this.ctx?.close();
     this.ctx = null;
+    this.workletLoaded = false;
+  }
+
+  /** Arrête les pistes du micro et débranche la capture. */
+  private releaseMic(): void {
+    this.capture?.port.close();
+    this.capture?.disconnect();
+    this.capture = null;
+    this.source?.disconnect();
+    this.source = null;
+    this.stream?.getTracks().forEach((t) => t.stop());
+    this.stream = null;
+    this.onLevel(0);
   }
 
   private send(data: object): void {

@@ -1,24 +1,34 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory, type RouterHistory } from 'vue-router'
+import type { Pinia } from 'pinia'
 import { routes } from '../routes'
 import { useAuthStore } from '../stores/auth'
-import type { Pinia } from 'pinia'
 import { isTeacher } from '../authoring/api'
+import { setUnauthorizedHandler } from '../services/http'
 
-export function createAppRouter(pinia: Pinia) {
-  const router = createRouter({
-    history: createWebHistory(),
-    routes,
-  })
+export const APP_TITLE = 'ECOS – Entraînement'
+
+/** Retour après connexion : seulement un chemin interne (pas de redirection ouverte). */
+export function safeRedirect(value: unknown): string {
+  const target = Array.isArray(value) ? value[0] : value
+  if (typeof target !== 'string' || !target.startsWith('/') || target.startsWith('//') || target.startsWith('/\\')) {
+    return '/'
+  }
+  return target.startsWith('/login') ? '/' : target
+}
+
+export function createAppRouter(pinia: Pinia, history: RouterHistory = createWebHistory()) {
+  // Le défilement se fait dans .main-view (App.vue), qui revient en haut à chaque page
+  const router = createRouter({ history, routes })
 
   router.beforeEach(async (to) => {
     const auth = useAuthStore(pinia)
 
-    // ✅ hydrate une seule fois (au 1er passage)
+    // Vérifie la session une seule fois (au premier passage)
     if (!auth.isHydrated) {
       await auth.hydrate()
     }
 
-    // ✅ si route protégée et non loggé → login + redirect vers la page voulue
+    // Page protégée sans session : connexion, puis retour à la page demandée
     if (to.meta.requiresAuth && !auth.isAuthenticated) {
       return { name: 'login', query: { redirect: to.fullPath } }
     }
@@ -28,12 +38,26 @@ export function createAppRouter(pinia: Pinia) {
       return { path: '/' }
     }
 
-    // ✅ si déjà loggé et va sur /login → redirect vers la page demandée ou /
+    // Déjà connecté : la page de connexion renvoie vers la page demandée
     if (to.name === 'login' && auth.isAuthenticated) {
-      return { path: (to.query.redirect as string) || '/' }
+      return { path: safeRedirect(to.query.redirect) }
     }
 
     return true
+  })
+
+  // Titre de l'onglet par page (lu en premier par les lecteurs d'écran)
+  router.afterEach((to) => {
+    document.title = to.meta.title ? `${to.meta.title} – ${APP_TITLE}` : APP_TITLE
+  })
+
+  // Session expirée (401 sur un appel de l'API) : on oublie l'utilisateur et on passe
+  // par la connexion, qui ramène ensuite sur la page en cours.
+  setUnauthorizedHandler(() => {
+    useAuthStore(pinia).clear()
+    const current = router.currentRoute.value
+    if (current.name === 'login') return
+    void router.replace({ name: 'login', query: { redirect: current.fullPath } })
   })
 
   return router

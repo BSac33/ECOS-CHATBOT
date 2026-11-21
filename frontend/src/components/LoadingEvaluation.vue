@@ -1,13 +1,10 @@
 <template>
-  <div class="loading-container">
-    <div class="spinner"></div>
-    <h2>Évaluation en cours...</h2>
-    <p>Le LLM analyse votre performance. Cela peut prendre jusqu'à une minute.</p>
+  <div class="loading-container" role="status" aria-live="polite">
+    <div class="spinner" aria-hidden="true"></div>
+    <h1>Correction en cours…</h1>
+    <p>L'analyse de votre passage peut prendre jusqu'à quelques minutes. Vous pouvez rester sur cette page.</p>
   </div>
 </template>
-
-<script setup lang="ts">
-</script>
 
 <style scoped>
 .loading-container {
@@ -17,13 +14,14 @@
   justify-content: center;
   min-height: 60vh;
   gap: 1.5rem;
+  text-align: center;
 }
 
 .spinner {
   width: 60px;
   height: 60px;
-  border: 4px solid #f3f3f3;
-  border-top: 4px solid #3498db;
+  border: 4px solid #e5e7eb;
+  border-top: 4px solid #1d4ed8;
   border-radius: 50%;
   animation: spin 1s linear infinite;
 }
@@ -33,15 +31,23 @@
   100% { transform: rotate(360deg); }
 }
 
-h2 {
-  color: #333;
+/* Mouvement réduit : la roue ralentit fortement au lieu de tourner vite */
+@media (prefers-reduced-motion: reduce) {
+  .spinner {
+    animation: none;
+    border-top-color: #93c5fd;
+  }
+}
+
+h1 {
+  color: #1f2937;
+  font-size: 1.5rem;
   margin: 0;
 }
 
 p {
-  color: #666;
+  color: #4b5563;
   margin: 0;
-  text-align: center;
   max-width: 400px;
 }
 </style>

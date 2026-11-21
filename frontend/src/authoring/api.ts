@@ -1,6 +1,6 @@
 // Atelier de création de cas : types de la fiche (miroir de case_sheet.py) et appels /authoring
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || '/api'
+import { http, LONG_TIMEOUT_MS, request } from '../services/http'
+import type { User } from '../types'
 
 export type FactCategory =
   | 'motif' | 'histoire' | 'symptome' | 'signe_negatif' | 'antecedent'
@@ -227,63 +227,47 @@ export interface CorpusHit {
 export interface ReferenceItem { number: number; title: string }
 export interface ReferenceSituation { number: number; title: string; linked: boolean }
 
-/** Erreur d'API : `detail` peut être un texte ou un objet ({message, issues}). */
-export class ApiError extends Error {
-  status: number
-  detail: any
-  constructor(status: number, detail: any) {
-    super(typeof detail === 'string' ? detail : detail?.message || `Erreur ${status}`)
-    this.status = status
-    this.detail = detail
-  }
-}
+const UPLOAD_TIMEOUT_MS = 120_000
 
-async function call<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const response = await fetch(`${API_BASE_URL}/authoring${endpoint}`, {
-    ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers as Record<string, string> || {}) },
-    credentials: 'include',
-  })
-  if (!response.ok) {
-    const body = await response.json().catch(() => ({ detail: 'Erreur réseau' }))
-    throw new ApiError(response.status, body.detail)
-  }
-  return response.json()
-}
-
+/** Appels /authoring : passent par le client HTTP unique (erreurs en français, 401, délais). */
 export const authoringApi = {
-  listCases: () => call<CaseSummary[]>('/cases'),
-  createCase: (title: string) => call<CaseDetail>('/cases', { method: 'POST', body: JSON.stringify({ title }) }),
-  getCase: (id: number) => call<CaseDetail>(`/cases/${id}`),
-  saveSheet: (id: number, sheet: CaseSheet) =>
-    call<CaseDetail>(`/cases/${id}/sheet`, { method: 'PUT', body: JSON.stringify(sheet) }),
-  publish: (id: number) =>
-    call<{ version: VersionOut; issues: Issue[] }>(`/cases/${id}/publish`, { method: 'POST' }),
-  requestReview: (id: number) => call<CaseDetail>(`/cases/${id}/review/request`, { method: 'POST' }),
-  clearReview: (id: number) => call<CaseDetail>(`/cases/${id}/review`, { method: 'DELETE' }),
-  markReviewed: (id: number, note: string) =>
-    call<CaseDetail>(`/cases/${id}/review`, { method: 'POST', body: JSON.stringify({ note }) }),
-  test: (id: number) => call<{ attempt_id: string; version_id: number }>(`/cases/${id}/test`, { method: 'POST' }),
+  listCases: () => http.get<CaseSummary[]>('/authoring/cases'),
+  createCase: (title: string) => http.post<CaseDetail>('/authoring/cases', { title }),
+  getCase: (id: number) => http.get<CaseDetail>(`/authoring/cases/${id}`),
+  saveSheet: (id: number, sheet: CaseSheet) => http.put<CaseDetail>(`/authoring/cases/${id}/sheet`, sheet),
+  publish: (id: number) => http.post<{ version: VersionOut; issues: Issue[] }>(`/authoring/cases/${id}/publish`),
+  requestReview: (id: number) => http.post<CaseDetail>(`/authoring/cases/${id}/review/request`),
+  clearReview: (id: number) => http.delete<CaseDetail>(`/authoring/cases/${id}/review`),
+  markReviewed: (id: number, note: string) => http.post<CaseDetail>(`/authoring/cases/${id}/review`, { note }),
+  test: (id: number) => http.post<{ attempt_id: string; version_id: number }>(`/authoring/cases/${id}/test`),
+  /** Assistant « Générer » : appel au modèle, délai long */
   assist: (id: number, task: AssistTask, sheet: CaseSheet, instructions = '') =>
-    call<Proposal>(`/cases/${id}/assist`, { method: 'POST', body: JSON.stringify({ task, sheet, instructions }) }),
-  uploadDocument: async (id: number, file: File, label: string) => {
+    http.post<Proposal>(`/authoring/cases/${id}/assist`, { task, sheet, instructions }, { timeout: LONG_TIMEOUT_MS }),
+  uploadDocument: (id: number, file: File, label: string) => {
     const form = new FormData()
     form.append('file', file)
     form.append('label', label)
-    const response = await fetch(`${API_BASE_URL}/authoring/cases/${id}/documents`, {
-      method: 'POST', body: form, credentials: 'include',
-    })
-    if (!response.ok) {
-      const body = await response.json().catch(() => ({ detail: 'Erreur réseau' }))
-      throw new ApiError(response.status, body.detail)
-    }
-    return response.json() as Promise<{ attachment_id: string; filename: string; mime_type: string; url: string }>
+    return request<{ attachment_id: string; filename: string; mime_type: string; url: string }>(
+      `/authoring/cases/${id}/documents`, { method: 'POST', body: form, timeout: UPLOAD_TIMEOUT_MS },
+    )
   },
-  items: () => call<ReferenceItem[]>('/reference/items'),
+  items: () => http.get<ReferenceItem[]>('/authoring/reference/items'),
   situations: (items: number[]) =>
-    call<ReferenceSituation[]>(`/reference/situations?items=${items.join(',')}`),
+    http.get<ReferenceSituation[]>(`/authoring/reference/situations?items=${items.join(',')}`),
   searchCorpus: (q: string, items: number[]) =>
-    call<CorpusHit[]>(`/corpus/search?q=${encodeURIComponent(q)}&items=${items.join(',')}&limit=8`),
+    http.get<CorpusHit[]>(`/authoring/corpus/search?q=${encodeURIComponent(q)}&items=${items.join(',')}&limit=8`),
+}
+
+/** Lien externe affichable : seulement http(s) (jamais javascript:, data:...). */
+export function safeExternalUrl(url: string | null | undefined): string | null {
+  const value = url?.trim()
+  if (!value || !/^https?:\/\//i.test(value)) return null
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.href : null
+  } catch {
+    return null
+  }
 }
 
 /** Identifiant court, même format que le serveur (f_xxxxxxxx, g_xxxxxxxx). */
@@ -305,7 +289,7 @@ export function emptyGridItem(): GridItem {
   return { id: newId('g'), criterion: '', points: 1, description: '', fact_ids: [], generated: false, sources: [] }
 }
 
-export function isTeacher(user: { role?: string } | null | undefined): boolean {
+export function isTeacher(user: Pick<User, 'role'> | null | undefined): boolean {
   return user?.role === 'teacher' || user?.role === 'admin'
 }
 

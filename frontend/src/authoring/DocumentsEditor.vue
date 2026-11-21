@@ -4,6 +4,7 @@ import { ref } from 'vue'
 import InputText from 'primevue/inputtext'
 import Button from 'primevue/button'
 import { authoringApi, newDocumentId, type StationDocument } from './api'
+import { attachmentUrl, errorMessage } from '../services/http'
 
 const documents = defineModel<StationDocument[]>({ required: true })
 const props = defineProps<{ caseId: number }>()
@@ -24,8 +25,8 @@ async function upload(doc: StationDocument, event: Event) {
   try {
     const out = await authoringApi.uploadDocument(props.caseId, file, doc.label)
     doc.attachment_id = out.attachment_id
-  } catch (e: any) {
-    error.value = e.message
+  } catch (e) {
+    error.value = errorMessage(e)
   } finally {
     uploading.value = null
     input.value = ''
@@ -36,12 +37,12 @@ async function upload(doc: StationDocument, event: Event) {
 <template>
   <div class="documents">
     <article v-for="(doc, i) in documents" :key="doc.id" class="doc" :data-field="`station.documents[${i}]`">
-      <a v-if="doc.attachment_id" :href="`/attachments/download/${doc.attachment_id}`" target="_blank" rel="noopener" class="thumb">
-        <img :src="`/attachments/download/${doc.attachment_id}`" :alt="doc.label" />
+      <a v-if="doc.attachment_id" :href="attachmentUrl(doc.attachment_id)" target="_blank" rel="noopener" class="thumb">
+        <img :src="attachmentUrl(doc.attachment_id)" :alt="doc.label || 'Document de la vignette'" />
       </a>
-      <div v-else class="thumb empty"><i class="pi pi-image"></i></div>
+      <div v-else class="thumb empty"><i class="pi pi-image" aria-hidden="true"></i></div>
       <div class="doc-body">
-        <InputText v-model="doc.label" fluid placeholder="Document 1 : tracé-ECG" />
+        <InputText v-model="doc.label" fluid placeholder="Document 1 : tracé-ECG" :aria-label="`Libellé du document ${i + 1}`" />
         <div class="doc-actions">
           <label class="file-button">
             <input type="file" accept="image/*,application/pdf" @change="upload(doc, $event)" />
@@ -54,7 +55,7 @@ async function upload(doc: StationDocument, event: Event) {
         </div>
       </div>
     </article>
-    <p v-if="error" class="error">{{ error }}</p>
+    <p v-if="error" class="error" role="alert">{{ error }}</p>
     <Button label="Ajouter un document" icon="pi pi-plus" text size="small" @click="add" />
   </div>
 </template>
@@ -68,6 +69,7 @@ async function upload(doc: StationDocument, event: Event) {
 .doc-body { flex: 1; display: flex; flex-direction: column; gap: 0.35rem; min-width: 0; }
 .doc-actions { display: flex; align-items: center; gap: 0.25rem; }
 .file-button input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+.file-button:focus-within span { outline: 3px solid #1d4ed8; outline-offset: 2px; }
 .file-button span { cursor: pointer; display: inline-flex; gap: 0.4rem; align-items: center; }
 .error { color: #b91c1c; margin: 0; }
 </style>

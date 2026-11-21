@@ -1,40 +1,64 @@
 <script setup lang="ts">
 import { ref } from 'vue';
-import { useAuthStore } from '../stores/auth';
+import { useRoute, useRouter } from 'vue-router';
 import InputText from 'primevue/inputtext';
 import Password from 'primevue/password';
 import Button from 'primevue/button';
 import Message from 'primevue/message';
-import { useRoute, useRouter } from 'vue-router';
+import { useAuthStore } from '../stores/auth';
 import { apiService } from '../services/api';
+import { ApiError } from '../services/http';
+import { safeRedirect } from '../router';
 
-const route = useRoute(); 
-const router = useRouter()
+const route = useRoute();
+const router = useRouter();
 const authStore = useAuthStore();
 
 const username = ref('');
 const password = ref('');
 const errorMessage = ref('');
+const submitting = ref(false);
+
+const FALLBACK = 'Connexion impossible, réessayez.';
 
 async function submit() {
-  await apiService.login({username: username.value, password: password.value});
-  await authStore.refreshSession();
-
-  const redirect = route.query.redirect as string || undefined;
-  router.replace(redirect || '/');
+  if (submitting.value) return;
+  errorMessage.value = '';
+  if (!username.value.trim() || !password.value) {
+    errorMessage.value = "Saisissez votre nom d'utilisateur et votre mot de passe.";
+    return;
+  }
+  submitting.value = true;
+  try {
+    await apiService.login({ username: username.value.trim(), password: password.value });
+    await authStore.refreshSession();
+    if (!authStore.isAuthenticated) {
+      errorMessage.value = FALLBACK;
+      return;
+    }
+    password.value = '';
+    await router.replace(safeRedirect(route.query.redirect));
+  } catch (error) {
+    // Message de l'API (en français) s'il y en a un, sinon message générique
+    errorMessage.value = error instanceof ApiError && typeof error.detail === 'string' && error.detail.trim()
+      ? error.detail
+      : FALLBACK;
+  } finally {
+    submitting.value = false;
+  }
 }
-
 </script>
 
 <template>
   <div class="login-container">
     <div class="login-card">
       <div class="login-header">
-        <h1>ECOS Chatbot</h1>
-        <p>Simulation de cas cliniques</p>
+        <h1>ECOS – Entraînement</h1>
+        <p>Simulation de stations cliniques</p>
       </div>
 
-      <form @submit.prevent="submit" class="login-form">
+      <form class="login-form" novalidate @submit.prevent="submit">
+        <!-- Message PrimeVue : role="alert", annoncé dès son apparition -->
         <Message v-if="errorMessage" severity="error" :closable="false">
           {{ errorMessage }}
         </Message>
@@ -44,7 +68,12 @@ async function submit() {
           <InputText
             id="username"
             v-model="username"
-            placeholder="Entrez votre nom d'utilisateur"
+            name="username"
+            autocomplete="username"
+            autocapitalize="none"
+            spellcheck="false"
+            required
+            :invalid="!!errorMessage && !username.trim()"
             class="w-full"
           />
         </div>
@@ -52,12 +81,14 @@ async function submit() {
         <div class="field">
           <label for="password">Mot de passe</label>
           <Password
-            id="password"
             v-model="password"
-            placeholder="Entrez votre mot de passe"
+            input-id="password"
+            :input-props="{ name: 'password', autocomplete: 'current-password', required: true }"
             :feedback="false"
-            toggleMask
+            toggle-mask
+            :invalid="!!errorMessage && !password"
             class="w-full"
+            input-class="w-full"
           />
         </div>
 
@@ -66,28 +97,29 @@ async function submit() {
           label="Se connecter"
           class="w-full"
           icon="pi pi-sign-in"
+          :loading="submitting"
         />
-
-        <div class="demo-accounts">
-          <p class="demo-title">Comptes de démonstration :</p>
-          <ul>
-            <li><strong>Étudiant :</strong> etudiant_test / changeme123</li>
-            <li><strong>Admin :</strong> admin / changeme123</li>
-          </ul>
-        </div>
       </form>
+
+      <p class="ai-notice login-ai">
+        <i class="pi pi-sparkles" aria-hidden="true"></i>
+        <span>
+          Cette plateforme utilise l'intelligence artificielle pour simuler les patients et proposer une correction.
+        </span>
+      </p>
     </div>
   </div>
 </template>
 
 <style scoped>
 .login-container {
-  min-height: 100vh;
+  min-height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background: linear-gradient(135deg, #4338ca 0%, #6d28d9 100%);
   padding: 1rem;
+  box-sizing: border-box;
 }
 
 .login-card {
@@ -97,6 +129,7 @@ async function submit() {
   padding: 2.5rem;
   width: 100%;
   max-width: 420px;
+  box-sizing: border-box;
 }
 
 .login-header {
@@ -105,14 +138,14 @@ async function submit() {
 }
 
 .login-header h1 {
-  color: #667eea;
+  color: #3730a3;
   margin: 0 0 0.5rem 0;
-  font-size: 2rem;
+  font-size: 1.75rem;
   font-weight: 700;
 }
 
 .login-header p {
-  color: #6c757d;
+  color: #4b5563;
   margin: 0;
   font-size: 0.95rem;
 }
@@ -131,7 +164,7 @@ async function submit() {
 
 .field label {
   font-weight: 600;
-  color: #495057;
+  color: #374151;
   font-size: 0.95rem;
 }
 
@@ -139,28 +172,14 @@ async function submit() {
   width: 100%;
 }
 
-.demo-accounts {
-  margin-top: 1rem;
-  padding: 1rem;
-  background: #f8f9fa;
-  border-radius: 8px;
-  font-size: 0.85rem;
+.login-ai {
+  margin: 1.5rem 0 0;
+  align-items: flex-start;
+  line-height: 1.4;
 }
 
-.demo-title {
-  margin: 0 0 0.5rem 0;
-  font-weight: 600;
-  color: #495057;
-}
-
-.demo-accounts ul {
-  margin: 0;
-  padding-left: 1.2rem;
-  color: #6c757d;
-}
-
-.demo-accounts li {
-  margin-bottom: 0.25rem;
+.login-ai .pi {
+  margin-top: 0.2rem;
 }
 
 :deep(.p-button) {
@@ -171,5 +190,11 @@ async function submit() {
 :deep(.p-inputtext),
 :deep(.p-password input) {
   padding: 0.75rem;
+}
+
+@media (max-width: 480px) {
+  .login-card {
+    padding: 1.5rem;
+  }
 }
 </style>

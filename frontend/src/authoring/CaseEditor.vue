@@ -23,11 +23,13 @@ import CorpusSearch from './CorpusSearch.vue'
 import DocumentsEditor from './DocumentsEditor.vue'
 import ScalesEditor from './ScalesEditor.vue'
 import TeachingEditor from './TeachingEditor.vue'
+import CaseAttempts from './CaseAttempts.vue'
 import SelectButton from 'primevue/selectbutton'
 import {
-  ApiError, authoringApi, DOMAIN_LABELS, type CaseDetail, type CaseSheet, type Issue, type ReferenceItem,
+  authoringApi, DOMAIN_LABELS, type CaseDetail, type CaseSheet, type Issue, type ReferenceItem,
   type ReferenceSituation,
 } from './api'
+import { ApiError, errorMessage } from '../services/http'
 
 const props = defineProps<{ caseId: string }>()
 const router = useRouter()
@@ -42,6 +44,7 @@ const side = ref('checks')
 // ---------- Enregistrement automatique ----------
 const saveState = ref<'saved' | 'dirty' | 'saving' | 'error'>('saved')
 const savedAt = ref<Date | null>(null)
+const saveError = ref<string | null>(null)
 let timer: ReturnType<typeof setTimeout> | null = null
 let applyingServer = false
 
@@ -49,8 +52,8 @@ async function load() {
   try {
     const d = await authoringApi.getCase(id.value)
     applyDetail(d)
-  } catch (e: any) {
-    loadError.value = e.message
+  } catch (e) {
+    loadError.value = errorMessage(e)
   }
 }
 
@@ -72,9 +75,11 @@ async function save(): Promise<boolean> {
     detail.value = d                       // vérifications et aperçu à jour (la fiche locale reste)
     savedAt.value = new Date()
     saveState.value = timer ? 'dirty' : 'saved'
+    saveError.value = null
     return true
   } catch (e) {
     saveState.value = 'error'
+    saveError.value = errorMessage(e)
     return false
   }
 }
@@ -181,8 +186,8 @@ async function testPatient() {
     const { attempt_id } = await authoringApi.test(id.value)
     window.open(router.resolve({ name: 'chat', params: { attemptId: attempt_id } }).href, '_blank')
     detail.value = await authoringApi.getCase(id.value)
-  } catch (e: any) {
-    banner.value = { severity: 'error', text: e.message }
+  } catch (e) {
+    banner.value = { severity: 'error', text: errorMessage(e) }
   } finally {
     busy.value = null
   }
@@ -196,12 +201,12 @@ async function publish() {
     const { version } = await authoringApi.publish(id.value)
     banner.value = { severity: 'success', text: `Version ${version.version} publiée : les nouvelles tentatives des étudiants utiliseront cette version.` }
     detail.value = await authoringApi.getCase(id.value)
-  } catch (e: any) {
+  } catch (e) {
     if (e instanceof ApiError && e.status === 422) {
       side.value = 'checks'
       banner.value = { severity: 'error', text: 'Corrigez les erreurs signalées avant de publier.' }
     } else {
-      banner.value = { severity: 'error', text: e.message }
+      banner.value = { severity: 'error', text: errorMessage(e) }
     }
   } finally {
     busy.value = null
@@ -230,8 +235,8 @@ async function reviewAction(action: 'request' | 'clear' | 'mark') {
       reviewNote.value = ''
       banner.value = { severity: 'success', text: 'Merci : la station est marquée comme relue.' }
     }
-  } catch (e: any) {
-    banner.value = { severity: 'error', text: e.message }
+  } catch (e) {
+    banner.value = { severity: 'error', text: errorMessage(e) }
   } finally {
     reviewBusy.value = false
   }
@@ -271,7 +276,7 @@ onBeforeUnmount(() => {
             <span class="save-state" :class="saveState">
               <template v-if="saveState === 'saving'"><i class="pi pi-spin pi-spinner"></i> Enregistrement…</template>
               <template v-else-if="saveState === 'dirty'">Modifications en cours…</template>
-              <template v-else-if="saveState === 'error'"><i class="pi pi-exclamation-circle"></i> Non enregistré</template>
+              <span v-else-if="saveState === 'error'" role="alert"><i class="pi pi-exclamation-circle" aria-hidden="true"></i> Non enregistré<template v-if="saveError"> : {{ saveError }}</template></span>
               <template v-else-if="savedAt">Enregistré à {{ savedAt.toLocaleTimeString('fr-FR', { hour: '2-digit', minute: '2-digit' }) }}</template>
             </span>
           </div>
@@ -296,7 +301,7 @@ onBeforeUnmount(() => {
 
       <div v-if="sheet" class="layout">
         <!-- ===== Fiche ===== -->
-        <main class="sheet">
+        <div class="sheet">
           <Tabs v-model:value="tab">
             <TabList>
               <Tab value="station">Station</Tab>
@@ -305,6 +310,7 @@ onBeforeUnmount(() => {
               <Tab value="examen">Examen clinique</Tab>
               <Tab value="correction">Correction</Tab>
               <Tab value="pedagogie">Pédagogie</Tab>
+              <Tab value="tentatives">Tentatives</Tab>
             </TabList>
             <fieldset class="sheet-fieldset" :disabled="!canEdit">
             <TabPanels>
@@ -317,13 +323,14 @@ onBeforeUnmount(() => {
                   </div>
                   <div class="row">
                     <div class="field">
-                      <label>Domaine de compétence</label>
-                      <Select v-model="sheet.station.domain" :options="DOMAINS" option-label="label" option-value="value" fluid />
+                      <label id="domain-label">Domaine de compétence</label>
+                      <Select v-model="sheet.station.domain" :options="DOMAINS" option-label="label" option-value="value" fluid
+                              aria-labelledby="domain-label" />
                     </div>
                     <div class="field">
-                      <label>Interlocuteur de l'étudiant</label>
+                      <label id="interlocutor-label">Interlocuteur de l'étudiant</label>
                       <SelectButton v-model="sheet.station.interlocutor" :options="INTERLOCUTORS" option-label="label"
-                                    option-value="value" :allow-empty="false" />
+                                    option-value="value" :allow-empty="false" aria-labelledby="interlocutor-label" />
                     </div>
                   </div>
                   <p v-if="sheet.station.source" class="source">Source : {{ sheet.station.source }}</p>
@@ -338,7 +345,7 @@ onBeforeUnmount(() => {
                     </div>
                     <div class="field narrow">
                       <label for="duration">Durée (min)</label>
-                      <InputNumber id="duration" v-model="sheet.station.duration_minutes" :min="1" :max="60" show-buttons fluid />
+                      <InputNumber input-id="duration" v-model="sheet.station.duration_minutes" :min="1" :max="60" show-buttons fluid />
                     </div>
                   </div>
                   <div class="field" data-field="station.student_instructions">
@@ -347,14 +354,14 @@ onBeforeUnmount(() => {
                               placeholder="Ce que l'étudiant lit avant d'entrer : contexte, tâches attendues." />
                   </div>
                   <div class="field" data-field="station.edn_items">
-                    <label>Items EDN (R2C)</label>
-                    <MultiSelect v-model="sheet.station.edn_items" :options="itemOptions" option-label="label" option-value="value"
+                    <label id="edn-label">Items EDN (R2C)</label>
+                    <MultiSelect aria-labelledby="edn-label" v-model="sheet.station.edn_items" :options="itemOptions" option-label="label" option-value="value"
                                  filter display="chip" fluid placeholder="Rattachez la station à ses items" empty-message="Aucun item : importez le référentiel" />
                     <small>L'assistant cherche dans le référentiel de ces items.</small>
                   </div>
                   <div class="field">
-                    <label>Situations de départ</label>
-                    <MultiSelect v-model="sheet.station.starting_situations" :options="situationGroups" option-group-label="label"
+                    <label id="situations-label">Situations de départ</label>
+                    <MultiSelect aria-labelledby="situations-label" v-model="sheet.station.starting_situations" :options="situationGroups" option-group-label="label"
                                  option-group-children="items" option-label="label" option-value="value" filter display="chip" fluid
                                  placeholder="Situations de départ couvertes" empty-message="Aucune situation : importez le référentiel" />
                   </div>
@@ -364,8 +371,8 @@ onBeforeUnmount(() => {
                     <small>Montrés à l'étudiant dès le début de la station (ECG, imagerie, résultats...).</small>
                   </div>
                   <div v-if="!noPatient" class="field narrow-wide">
-                    <label>Voix du patient (mode oral)</label>
-                    <Select v-model="sheet.station.voice_id" :options="voiceOptions" option-label="label" option-value="value" fluid />
+                    <label id="voice-label">Voix du patient (mode oral)</label>
+                    <Select aria-labelledby="voice-label" v-model="sheet.station.voice_id" :options="voiceOptions" option-label="label" option-value="value" fluid />
                   </div>
                 </div>
               </TabPanel>
@@ -386,11 +393,11 @@ onBeforeUnmount(() => {
                     <div class="field"><label for="ln">Nom</label><InputText id="ln" v-model="sheet.patient.last_name" fluid /></div>
                     <div class="field narrow" data-field="patient.age">
                       <label for="age">Âge</label>
-                      <InputNumber id="age" v-model="sheet.patient.age" :min="0" :max="120" fluid />
+                      <InputNumber input-id="age" v-model="sheet.patient.age" :min="0" :max="120" fluid />
                     </div>
                     <div class="field narrow">
-                      <label>Sexe</label>
-                      <Select v-model="sheet.patient.sex" :options="SEX" option-label="label" option-value="value" fluid />
+                      <label id="sex-label">Sexe</label>
+                      <Select aria-labelledby="sex-label" v-model="sheet.patient.sex" :options="SEX" option-label="label" option-value="value" fluid />
                     </div>
                   </div>
                   <div class="row">
@@ -408,8 +415,8 @@ onBeforeUnmount(() => {
                     </div>
                   </div>
                   <div class="field narrow-wide">
-                    <label>Façon de parler</label>
-                    <Select v-model="sheet.patient.language_register" :options="REGISTERS" option-label="label" option-value="value" fluid />
+                    <label id="register-label">Façon de parler</label>
+                    <Select aria-labelledby="register-label" v-model="sheet.patient.language_register" :options="REGISTERS" option-label="label" option-value="value" fluid />
                   </div>
                   <div class="field">
                     <label>Ses inquiétudes</label>
@@ -503,8 +510,14 @@ onBeforeUnmount(() => {
               </TabPanel>
             </TabPanels>
             </fieldset>
+            <!-- Hors du fieldset : consultable aussi en lecture seule -->
+            <TabPanels>
+              <TabPanel value="tentatives">
+                <CaseAttempts v-if="tab === 'tentatives'" :case-id="id" />
+              </TabPanel>
+            </TabPanels>
           </Tabs>
-        </main>
+        </div>
 
         <!-- ===== Panneau latéral ===== -->
         <aside class="side">
@@ -547,7 +560,7 @@ onBeforeUnmount(() => {
                     </div>
                   </template>
                 </section>
-                <p v-if="!issues.length" class="ok"><i class="pi pi-check-circle"></i> Rien à signaler : la station peut être publiée.</p>
+                <p v-if="!issues.length" class="ok"><i class="pi pi-check-circle" aria-hidden="true"></i> Rien à signaler : la station peut être publiée.</p>
                 <p v-if="pendingReview" class="muted">{{ pendingReview }} proposition(s) de l'assistant à relire (badge orange).</p>
                 <template v-for="level in (['erreur', 'attention', 'conseil'] as const)" :key="level">
                   <section v-if="counts[level]" class="issue-group">
@@ -585,7 +598,7 @@ onBeforeUnmount(() => {
 </template>
 
 <style scoped>
-.editor-page { height: 100%; overflow-y: auto; padding: 1rem 0 3rem; box-sizing: border-box; }
+.editor-page { padding: 1rem 0 3rem; box-sizing: border-box; }
 .topbar { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; margin-bottom: 0.75rem; }
 .title-block { flex: 1; min-width: min(16rem, 100%); }
 .title-block h1 { font-size: 1.5rem; margin: 0; }
