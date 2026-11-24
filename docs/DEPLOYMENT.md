@@ -136,10 +136,40 @@ KYUTAI_API_KEY=<clé>
 Puis `docker compose -f docker-compose.prod.yml up -d` (le conteneur `api` relit `fastapi.env`
 quand il est recréé).
 
+### Un seul modèle pour tout (par exemple une H100 du CHU)
+
+Un modèle plus grand (ex. 27B) sur une carte de 80 Go peut tenir tous les rôles : patient,
+arbitre, correction, assistant de l'atelier. Il suffit de faire pointer l'arbitre sur le même
+serveur (et la licence de recherche de Qwen2.5-3B n'est plus en jeu) :
+
+```bash
+VLLM_BASE_URL=http://<serveur>:8001/v1
+VLLM_MODEL=<nom exact renvoyé par /v1/models>
+VLLM_API_KEY=<clé>
+VLLM_ARBITER_BASE_URL=http://<serveur>:8001/v1
+VLLM_ARBITER_MODEL=<même nom>
+VLLM_ARBITER_API_KEY=<clé>
+```
+
+Le serveur vLLM doit être lancé avec l'appel d'outils (agent patient) et un contexte assez
+long pour la correction :
+
+```bash
+vllm serve <modèle> --api-key <clé> --host <adresse> --port 8001 \
+  --max-model-len 32768 --gpu-memory-utilization 0.85 --enable-prefix-caching \
+  --enable-auto-tool-choice --tool-call-parser hermes     # parseur adapté au modèle
+```
+
+`hermes` convient aux Qwen2.5 et Qwen3 ; pour une autre famille, prendre le parseur indiqué
+par la documentation de vLLM pour ce modèle (le script de vérification ci-dessous dit si les
+outils sont bien décodés). Pour garder la voix sur la même carte (~8 Go pour Kyutai), baisser
+`--gpu-memory-utilization` en conséquence. Une carte partagée avec d'autres traitements par
+lots ralentit le patient et les corrections : la réserver pendant les séances avec étudiants.
+
 ### Application sur un poste local (tests)
 
-`fastapi.env` : `CORS_ORIGINS=http://localhost:8080`, `SECURE_COOKIES=False`. Lancer avec
-`WEB_PORT=127.0.0.1:8080` pour que le site ne soit joignable que depuis le poste. Le micro
+`fastapi.env` : `CORS_ORIGINS=http://localhost:8080`, `SECURE_COOKIES=False`. Le site est
+publié sur `127.0.0.1:8080` par défaut : joignable depuis le poste seulement. Le micro
 du navigateur fonctionne sur `http://localhost` (contexte sécurisé). Si la machine de modèles
 a une adresse en 172.16-31.x.x et reste injoignable depuis le conteneur `api` alors qu'elle
 répond depuis le poste, changer les plages d'adresses de Docker (`default-address-pools`).
@@ -162,13 +192,15 @@ bundle système : l'import du référentiel télécharge des pages publiques en 
 ### Vérifier
 
 ```bash
-docker compose -f docker-compose.prod.yml exec api python -c "
-import os; from openai import OpenAI
-for url, key in [('VLLM_BASE_URL', 'VLLM_API_KEY'), ('VLLM_ARBITER_BASE_URL', 'VLLM_ARBITER_API_KEY')]:
-    print(url, [m.id for m in OpenAI(base_url=os.environ[url], api_key=os.environ[key]).models.list()])"
+# Modèle servi, appel d'outils, patient (réplique + examen), arbitre (JSON strict), correction
+docker compose -f docker-compose.prod.yml exec -u ecos api python scripts/verifier_modeles.py
+# + charge : 30 étudiants qui parlent en même temps, puis 30 corrections simultanées
+docker compose -f docker-compose.prod.yml exec -u ecos api python scripts/verifier_modeles.py --charge 30
 ```
 
-Puis, sur le site, lancer une station d'interrogatoire en compte étudiant.
+Chaque point est donné OK, ATTENTION ou ÉCHEC avec la correction à apporter (code de sortie 1
+si un point bloque). Cas fictif, rien n'est écrit en base. Puis, sur le site, lancer une
+station d'interrogatoire en compte étudiant.
 
 ## 4. Exploitation
 

@@ -347,8 +347,11 @@ npm test       # Vitest
 # Full workflow test via CLI
 make test
 
-# Model benchmark for the simulated patient (any OpenAI-compatible server; Colab: notebooks/banc_essai_colab.ipynb)
+# Check a model server before students use it (model name, tool calling, patient, arbiter, grading; --charge N = load test)
 cd backend_ecos_chatbot/app
+python scripts/verifier_modeles.py --charge 30
+
+# Model benchmark for the simulated patient (any OpenAI-compatible server; Colab: notebooks/banc_essai_colab.ipynb)
 python scripts/bench_patient.py jouer --base-url URL --model M --label nom --stations exemple   # or a private pack
 python scripts/bench_patient.py juger --base-url URL --model JUDGE --stations exemple
 python scripts/bench_patient.py resume   # comparison table + blind rating CSV for teachers
