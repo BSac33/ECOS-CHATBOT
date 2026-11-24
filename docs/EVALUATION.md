@@ -187,6 +187,17 @@ Chaque item noté doit porter une `citation` exacte des paroles de l'étudiant.
   (affiché au débriefing et à l'enseignant) ;
 - recalcule les totaux, les échelles et la note /20 : le LLM ne fait jamais les sommes.
 
+### Didascalies
+
+Dans une station avec patient ou professionnel, affirmer n'est pas faire : un passage où
+l'étudiant raconte ce que le patient ou l'examinateur aurait dit ou fait, affirme une action
+déjà faite, énonce un résultat qu'on ne lui a pas donné ou parle de la notation ne valide
+aucun item. Ces passages (détectés par `narration.py`) sont marqués
+`[didascalie ignorée : …]` dans la transcription, et les citations sont vérifiées contre les
+paroles de l'étudiant **sans** ses didascalies : une citation qui n'existe que dans une
+didascalie est introuvable, donc signalée pour relecture. Normalement l'arbitre les bloque
+avant (voir `docs/PATIENT_AGENT.md`) ; ceci couvre les messages qu'il laisse passer.
+
 ### Relecture par l'enseignant
 
 L'auteur de la station (ou un administrateur) peut relire et corriger :

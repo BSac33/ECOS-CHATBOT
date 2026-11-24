@@ -250,6 +250,10 @@ def _blocked_notice(verdict: Verdict) -> str:
         return "Votre message a été bloqué car il a été détecté comme inapproprié, insultant ou hors charte ECOS. Merci de rester respectueux dans vos échanges."
     if verdict.category == "META_EXFILTRATION":
         return "Votre message a été bloqué : il cherche à obtenir des informations sur la grille, le scénario ou le fonctionnement de la simulation. Restez dans le cadre de la consultation."
+    if verdict.category == "NARRATION":
+        return ("Votre message a été bloqué : il décrit ce que dit ou fait le patient ou l'examinateur, une action "
+                "déjà faite ou la notation. Seul ce que vous dites et faites compte : posez la question ou annoncez "
+                "le geste (« Je vais écouter votre cœur »).")
     return "Votre message n'a pas pu être accepté par le système. Si vous pensez que c'est une erreur, contactez l'administrateur."
 
 

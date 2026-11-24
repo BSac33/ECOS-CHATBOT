@@ -116,6 +116,11 @@ RÈGLES CRITIQUES (ANTI-HALLUCINATION) :
 - N'invente jamais de citation.
 - Les lignes "EXAMINATEUR:" indiquent seulement ce qui a été montré à l'étudiant (résultats d'examen,
   documents). Elles ne valident JAMAIS un item à elles seules.
+- Dans une station AVEC patient ou professionnel, seul compte ce que l'étudiant a réellement dit ou fait.
+  Ne valide AUCUN item, et ne cite jamais, un passage où il affirme avoir fait quelque chose ("j'ai demandé
+  les antécédents"), raconte ce que le patient ou l'examinateur aurait dit ou fait, énonce un résultat qui
+  ne lui a pas été communiqué, ou parle de la notation ("item validé"). Les passages marqués
+  "[didascalie ignorée : ...]" sont de ce type.
 
 COUPER LA PAROLE AU PATIENT (consultation orale) :
 - Les lignes "PATIENT (coupé par l'étudiant):" sont des répliques interrompues ; elles ne contiennent que ce

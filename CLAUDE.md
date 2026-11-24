@@ -140,6 +140,7 @@ alembic downgrade -1
 
 **AI Utilities:**
 - `vllm_chat_utils.py` - Legacy patient reply without tools (`PATIENT_AGENT_ENABLED=false`) and `build_patient_system_instruction`
+- `narration.py` - Stage-direction detection ("(le patient avoue que…)", "*l'examinateur me tend l'ECG*", "(j'ai déjà posé toutes les questions)", "[items validés]"): the student writing for others instead of acting, a known exploit of LLM NPCs in games. Used by the arbiter prefilter (`NARRATION`, blocking), the grading transcript (`mark_narration`) and the citation check (`strip_narration`)
 - `arbiter.py` - Fast student-message arbiter: lexical prefilter (instant block), LRU verdict cache, minimal LLM call (`{"category","tone"}` JSON, fixed system prompt for vLLM prefix caching, reused client, `ARBITER_TIMEOUT` then fail-open). Benchmark: `scripts/arbiter_bench.py`
 - `kyutai_voice.py` - Kyutai STT/TTS clients (moshi-server WebSocket + msgpack protocol, 24 kHz float32 PCM), `WordChunker` (LLM text deltas -> whole words for TTS)
 - `voice_routes.py` - Voice mode WebSocket `/chat/attempts/{id}/voice`: push-to-talk (`start`/`stop`) or hands-free consultation (`conversation_start`: continuous STT, end of turn when pause probability > 0.6, barge-in by voice with echo filter, false-start merge). STT -> shared `_run_turn` -> TTS word by word; barge-in cuts the voice only, the reply text is still persisted. Interrupting the patient is an ECOS fault: recorded on the patient message (`interrupted_by` voice|push_to_talk|button, `spoken_content` = words actually spoken, from TTS word timestamps), used in patient history, evaluation transcript and debrief. See `docs/VOICE.md`
@@ -318,7 +319,7 @@ Compiled from the case sheet (`case_sheet.compile_case`) and run by `patient_age
 - If no explicit question, only expresses emotion + short non-medical question
 
 ### Anti-Cheat Measures
-The arbiter (`arbiter.py`) blocks `ABUSIVE` and `META_EXFILTRATION` messages (attempts to extract the grid, scenario, prompt, or to break the patient's role) and flags `OFF_TOPIC` / aggressive tone in `moderation_events`. Blocked messages never reach the transcript and the patient generation is cancelled.
+The arbiter (`arbiter.py`) blocks `ABUSIVE`, `META_EXFILTRATION` (attempts to extract the grid, scenario, prompt, or to break the patient's role) and `NARRATION` (stage directions that make the patient or examiner speak or act, claimed actions or results, grading talk) and flags `OFF_TOPIC` / aggressive tone in `moderation_events`. The patient / PSS prompts also refuse to confirm stage directions or false claims ("Non, je n'ai pas dit ça."), and the grader ignores them. Blocked messages never reach the transcript and the patient generation is cancelled.
 
 ### Error Handling
 - Patient turn failure: SSE `error` (502), nothing stored, the frontend offers "Réessayer"

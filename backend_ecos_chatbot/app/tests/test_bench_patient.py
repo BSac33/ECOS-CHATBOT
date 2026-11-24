@@ -141,6 +141,6 @@ def test_cli_play_exemple(tmp_path, monkeypatch):
     bench.main(["jouer", "--base-url", "http://x/v1", "--model", "m", "--label", "cli", "--stations", "exemple",
                 "--profils", "tricheur", "--resultats", str(tmp_path)])
     lines = (tmp_path / "cli" / "repliques.jsonl").read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 2 + len(bench.ATTACKS)
+    assert len(lines) == 2 + len(bench.ATTACKS) + len(bench.NARRATIONS) + 1  # + fausse affirmation
     bench.main(["resume", "--resultats", str(tmp_path)])
     assert (tmp_path / "resume.csv").is_file()

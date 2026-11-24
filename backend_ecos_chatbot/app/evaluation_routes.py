@@ -26,6 +26,7 @@ from models import (
     Attempts, CaseVersion, ChatRole, ClinicalCase, EvaluationGrid, EvaluationItemResult, EvaluationOut,
     EvaluationResult, Message, User, UserRole,
 )
+from narration import mark_narration, strip_narration
 from scoring import recompute_totals, score_evaluation
 
 logger = logging.getLogger(__name__)
@@ -57,7 +58,9 @@ def build_evaluation_transcript(messages: list, no_interlocutor: bool = False,
             continue
         role = msg.role.value
         if role == "student":
-            parts.append(f"ÉTUDIANT: {msg.content}")
+            # Didascalies signalées au correcteur (station avec interlocuteur) : elles ne valent pas des actes
+            content = msg.content if no_interlocutor else mark_narration(msg.content)
+            parts.append(f"ÉTUDIANT: {content}")
         elif role == "patient" and professional:
             # Professionnel de santé simulé : même canal que le patient, autre rôle
             parts.append(f"PROFESSIONNEL DE SANTÉ ({professional}): {_spoken_text(msg)}")
@@ -111,7 +114,9 @@ def _grid_and_context(session: Session, attempt: Attempts, case: ClinicalCase) -
 
 
 def _student_text(messages: list) -> str:
-    return "\n".join(m.content for m in messages
+    """Paroles de l'étudiant, sans les didascalies : une citation qui n'existe que dans une
+    didascalie est introuvable, donc signalée pour relecture."""
+    return "\n".join(strip_narration(m.content) for m in messages
                      if m.role == ChatRole.student and not m.content.startswith("/"))
 
 
