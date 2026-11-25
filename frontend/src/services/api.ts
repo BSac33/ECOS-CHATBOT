@@ -91,6 +91,11 @@ export const apiService = {
     return http.post(`${attempt(attemptId)}/finalize`)
   },
 
+  /** Station sans interlocuteur : réponse écrite rendue en une fois (termine la station). */
+  submitAnswer(attemptId: string, answer: string): Promise<{ status: string; completed_at: string }> {
+    return http.post(`${attempt(attemptId)}/answer`, { answer })
+  },
+
   // ---------- Correction et débriefing ----------
 
   /** Correction (mise en cache côté serveur) : peut prendre plusieurs minutes. */

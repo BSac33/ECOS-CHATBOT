@@ -17,9 +17,11 @@
             </div>
 
             <Button
+                v-if="showStop"
                 label="Terminer"
                 severity="danger"
-                icon="pi pi-stop"
+                outlined
+                icon="pi pi-stop-circle"
                 @click="handleStop"
                 :disabled="isExpired || isFinalizing"
                 :loading="isFinalizing"
@@ -44,9 +46,18 @@ const props = withDefaults(defineProps<{
     attemptId: string;
     title?: string;
     interlocutor?: Interlocutor;
+    /** Bouton « Terminer » (masqué quand la station se termine en rendant une réponse écrite) */
+    showStop?: boolean;
+    /**
+     * Fin du temps : appelée avant de terminer la station (ex. envoi de la réponse écrite).
+     * Renvoie true si elle a elle-même terminé la station et mené au débriefing.
+     */
+    onExpire?: () => Promise<boolean>;
 }>(), {
     title: '',
     interlocutor: 'patient',
+    showStop: true,
+    onExpire: undefined,
 });
 
 const router = useRouter();
@@ -240,6 +251,7 @@ async function expire(quiet = false) {
         announce('end', EXPIRED_MESSAGE);
         toast.add({ severity: 'info', summary: EXPIRED_MESSAGE, detail: 'Passage au débriefing.', life: 6000 });
     }
+    if (props.onExpire && await props.onExpire()) return;
     await finalizeAttempt();
 }
 
@@ -273,11 +285,12 @@ onUnmounted(() => {
     align-items: center;
     justify-content: space-between;
     flex-wrap: wrap;
-    padding: 1rem 1.5rem;
-    background-color: #ffffff;
-    border-bottom: 2px solid #e9ecef;
-    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
     gap: 0.75rem 1rem;
+    padding: 0.85rem 1.25rem;
+    background: var(--ecos-surface);
+    border: 1px solid var(--ecos-border);
+    border-radius: var(--ecos-radius);
+    box-shadow: var(--ecos-shadow);
 }
 
 .case-title {
@@ -287,67 +300,67 @@ onUnmounted(() => {
 
 .case-title h1 {
     margin: 0;
-    font-size: 1.25rem;
-    font-weight: 600;
-    color: #212529;
+    font-size: 1.15rem;
+    font-weight: 650;
+    line-height: 1.3;
     overflow-wrap: anywhere;
 }
 
 .case-title .ai-notice {
-    margin: 0.2rem 0 0;
+    margin: 0.15rem 0 0;
 }
 
 .header-actions {
     display: flex;
     align-items: center;
-    gap: 1rem;
+    gap: 0.75rem;
     flex-shrink: 0;
 }
 
+/* Minuteur : neutre, puis orange et rouge en fin de station (contraste ≥ 4,5:1) */
 .timer {
-    display: flex;
+    display: inline-flex;
     align-items: center;
-    gap: 0.5rem;
-    padding: 0.5rem 1rem;
-    border-radius: 8px;
-    font-weight: 600;
-    font-size: 1.1rem;
+    gap: 0.45rem;
+    padding: 0.4rem 0.85rem;
+    border-radius: 999px;
+    border: 1px solid transparent;
+    font-weight: 650;
+    font-size: 1.05rem;
     transition: background-color 0.3s ease, color 0.3s ease;
 }
 
 .timer i {
-    font-size: 1.2rem;
+    font-size: 1rem;
 }
 
-/* Couleurs selon le temps restant (contraste ≥ 4,5:1) */
 .timer-normal {
-    background-color: #d4edda;
-    color: #155724;
+    background: var(--ecos-surface-muted);
+    border-color: var(--ecos-border);
+    color: var(--ecos-text-2);
 }
 
 .timer-warning {
-    background-color: #fff3cd;
-    color: #6b4f00;
+    background: var(--ecos-warning-soft);
+    border-color: #fcd34d;
+    color: #92400e;
 }
 
 .timer-critical {
-    background-color: #f8d7da;
-    color: #721c24;
+    background: var(--ecos-danger-soft);
+    border-color: #fca5a5;
+    color: #991b1b;
     animation: pulse 1s infinite;
 }
 
 .timer-expired {
-    background-color: #343a40;
+    background: #334155;
     color: #ffffff;
 }
 
 @keyframes pulse {
-    0%, 100% {
-        opacity: 1;
-    }
-    50% {
-        opacity: 0.7;
-    }
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0.7; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -366,16 +379,14 @@ onUnmounted(() => {
 
 @media (max-width: 768px) {
     .chat-header {
-        padding: 0.75rem 1rem;
+        padding: 0.65rem 0.85rem;
     }
-
     .case-title h1 {
-        font-size: 1.05rem;
+        font-size: 1.02rem;
     }
-
     .timer {
-        font-size: 1rem;
-        padding: 0.4rem 0.8rem;
+        font-size: 0.95rem;
+        padding: 0.3rem 0.7rem;
     }
 }
 </style>

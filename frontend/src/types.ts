@@ -66,6 +66,8 @@ export interface AttemptCaseInfo {
   interlocutor: Interlocutor
   interlocutor_label: string
   domain: string | null
+  /** Énoncé remis à l'étudiant (volet des stations sans interlocuteur) */
+  student_instructions?: string
 }
 
 export const STATION_TYPE_LABELS: Record<string, string> = {

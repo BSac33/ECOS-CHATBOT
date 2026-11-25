@@ -146,6 +146,73 @@ async def test_silent_station_turn(session, silent_world, monkeypatch):
     assert info["interlocutor"] == "aucun" and info["domain"] == "iconographie"
 
 
+def test_written_answer_is_submitted_once(session, silent_world):
+    """Station sans interlocuteur : réponse complète rendue en une fois, station terminée."""
+    from fastapi import HTTPException
+    from pydantic import ValidationError
+    from sqlmodel import select
+
+    import chat_routes
+    from models import MAX_WRITTEN_ANSWER_CHARS, AnswerIn, ChatRole, Message
+
+    attempt, user = silent_world["attempt"], silent_world["user"]
+    info = chat_routes.get_case_info(attempt.id, session, user)
+    assert info["student_instructions"].startswith("Interprétez le tracé")
+    assert "rendez-la en une fois" in info["student_instructions"]
+
+    long_answer = "Rythme sinusal régulier. " * 200          # bien plus long qu'un message de chat
+    assert 2000 < len(long_answer) < MAX_WRITTEN_ANSWER_CHARS
+    out = chat_routes.submit_written_answer(attempt.id, AnswerIn(answer=long_answer), session, user)
+    assert out["status"] == "ok"
+    session.refresh(attempt)
+    assert attempt.is_completed and attempt.completed_at is not None
+    rows = session.exec(select(Message).where(Message.attempt_id == attempt.id, Message.role == ChatRole.student)).all()
+    assert len(rows) == 1 and rows[0].content == long_answer.strip()
+
+    with pytest.raises(HTTPException) as exc:      # une seule fois
+        chat_routes.submit_written_answer(attempt.id, AnswerIn(answer="Encore"), session, user)
+    assert exc.value.status_code == 409
+    with pytest.raises(ValidationError):
+        AnswerIn(answer="x" * (MAX_WRITTEN_ANSWER_CHARS + 1))
+
+
+def test_written_answer_deadline(session, silent_world):
+    """Rendue juste après la fin du temps (envoi automatique) : acceptée ; trop tard : refusée."""
+    from datetime import datetime, timedelta
+
+    from fastapi import HTTPException
+
+    import chat_routes
+    from models import AnswerIn
+
+    attempt, user = silent_world["attempt"], silent_world["user"]
+    attempt.expires_at = datetime.utcnow() - timedelta(seconds=10)
+    session.add(attempt)
+    session.commit()
+    assert chat_routes.submit_written_answer(attempt.id, AnswerIn(answer="Tracé normal."), session, user)["status"] == "ok"
+
+    attempt.is_completed, attempt.completed_at = False, None
+    attempt.expires_at = datetime.utcnow() - timedelta(seconds=chat_routes.ANSWER_GRACE_SECONDS + 30)
+    session.add(attempt)
+    session.commit()
+    with pytest.raises(HTTPException) as exc:
+        chat_routes.submit_written_answer(attempt.id, AnswerIn(answer="Trop tard."), session, user)
+    assert exc.value.status_code == 410
+    session.refresh(attempt)
+    assert attempt.is_completed
+
+
+def test_written_answer_refused_for_conversation_stations(session, world):
+    from fastapi import HTTPException
+
+    import chat_routes
+    from models import AnswerIn
+
+    with pytest.raises(HTTPException) as exc:
+        chat_routes.submit_written_answer(world["attempt"].id, AnswerIn(answer="Bonjour"), session, world["user"])
+    assert exc.value.status_code == 409
+
+
 def test_silent_station_evaluation(session, silent_world, monkeypatch):
     import evaluation_routes
     from models import ChatRole, Message

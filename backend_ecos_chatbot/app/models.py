@@ -23,6 +23,13 @@ MAX_CHAT_MESSAGE_CHARS = 2000
 class ChatIn(BaseModel):
     message: str = PydanticField(min_length=1, max_length=MAX_CHAT_MESSAGE_CHARS)
 
+# Réponse écrite d'une station sans interlocuteur : rédigée puis rendue en une fois
+MAX_WRITTEN_ANSWER_CHARS = 12000
+
+
+class AnswerIn(BaseModel):
+    answer: str = PydanticField(min_length=1, max_length=MAX_WRITTEN_ANSWER_CHARS)
+
 class ExaminerNoteOut(BaseModel):
     """Information transmise par l'examinateur (hors personnage patient).
 

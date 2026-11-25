@@ -9,7 +9,7 @@ from typing import Any, AsyncIterator, Callable, ContextManager, Optional
 from db import engine, get_session
 import json
 import os
-from models import Attachment, CaseVersion, ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, ExaminerNoteOut, ModerationEvent, StationType, User
+from models import AnswerIn, Attachment, CaseVersion, ClinicalCase, Attempts, Message, ChatRole, AttemptCreateIn, AttemptOut, ChatIn, ChatOut, ExaminerNoteOut, ModerationEvent, StationType, User
 from vllm_chat_utils import generate_patient_reply_vllm as generate_patient_reply
 from arbiter import Verdict, arbitrate, prefilter
 from patient_agent import AgentEvent, CaseToolContext, DocumentRef, PatientAgentResult, StreamItem, stream_patient_agent
@@ -179,6 +179,8 @@ def get_case_info(attempt_id: UUID, session: Session = Depends(get_session), use
         "interlocutor": info.get("interlocutor", "patient"),
         "interlocutor_label": info.get("interlocutor_label", "Patient"),
         "domain": info.get("domain"),
+        # Énoncé (déjà remis à l'étudiant au début de la station) : volet des stations sans interlocuteur
+        "student_instructions": (version.student_instructions if version else case.student_instructions) or "",
     }
 
 
@@ -695,6 +697,40 @@ async def chat_stream(
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# Réponse rendue au moment où le temps s'écoule : latence du réseau et envoi automatique
+ANSWER_GRACE_SECONDS = 60
+
+
+@router.post("/attempts/{attempt_id}/answer")
+def submit_written_answer(attempt_id: UUID, payload: AnswerIn, session: Session = Depends(get_session),
+                          user: User = Depends(check_authorization())):
+    """Station sans interlocuteur : la réponse complète et construite est rendue en une fois,
+    puis la station se termine. Acceptée jusqu'à ANSWER_GRACE_SECONDS après la fin du temps
+    (envoi automatique au moment où il s'écoule)."""
+    attempt = session.get(Attempts, attempt_id)
+    if not attempt or attempt.user_id != user.id:
+        raise HTTPException(404, "Tentative introuvable")
+    if attempt.is_completed:
+        raise HTTPException(409, "Votre réponse a déjà été rendue : la station est terminée.")
+    info = case_publishing.runtime(attempt_version(session, attempt)) or {}
+    if info.get("interlocutor") != "aucun":
+        raise HTTPException(409, "Cette station se déroule en échange avec un interlocuteur.")
+    now = datetime.utcnow()
+    if attempt.expires_at and now > attempt.expires_at + timedelta(seconds=ANSWER_GRACE_SECONDS):
+        attempt.is_completed = True
+        attempt.completed_at = attempt.expires_at
+        session.add(attempt)
+        session.commit()
+        raise HTTPException(410, "Le temps imparti est écoulé : la réponse n'a pas pu être rendue.")
+    session.add(Message(attempt_id=attempt.id, role=ChatRole.student, content=payload.answer.strip(),
+                        modality="text", created_at=now))
+    attempt.is_completed = True
+    attempt.completed_at = now
+    session.add(attempt)
+    session.commit()
+    return {"status": "ok", "completed_at": now.isoformat()}
 
 
 @router.post("/attempts/{attempt_id}/finalize")

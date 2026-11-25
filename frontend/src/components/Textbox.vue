@@ -68,18 +68,22 @@ function handleSend() {
 .textbox {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
-    gap: 0.75rem;
+    align-items: flex-end;
+    gap: 0.5rem;
     min-height: 0;
 }
 
 .textbox :deep(textarea) {
     flex: 1;
     min-width: 0;
+    max-height: 12rem;
+    border-radius: 10px;
+    line-height: 1.5;
 }
 
 .send-button {
-    padding: 1rem;
+    width: 2.9rem;
+    height: 2.9rem;
     flex-shrink: 0;
 }
 
@@ -87,6 +91,6 @@ function handleSend() {
     flex-basis: 100%;
     margin: 0;
     font-size: 0.8rem;
-    color: #4b5563;
+    color: var(--ecos-muted);
 }
 </style>

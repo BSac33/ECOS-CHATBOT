@@ -10,6 +10,8 @@ export const INTERRUPTED_MESSAGE = 'La connexion a été interrompue avant la fi
 export const EXPIRED_MESSAGE = 'Le temps de la station est écoulé.'
 export const TOO_LONG_MESSAGE = 'Message trop long : 2000 caractères au maximum.'
 export const MAX_MESSAGE_LENGTH = 2000
+/** Réponse écrite d'une station sans interlocuteur (rendue en une fois) */
+export const MAX_ANSWER_LENGTH = 12000
 
 export interface TurnHandlers {
   /** Réponse acceptée par le serveur : la réplique va arriver */

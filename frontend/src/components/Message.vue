@@ -1,8 +1,8 @@
 <template>
     <div class="message-wrapper" :class="alignmentClass">
         <div class="message-bubble" :class="[bubbleClass, { 'bubble-blocked': message.blocked, 'bubble-pending': message.pending, 'bubble-failed': message.failed }]">
-            <span v-if="message.role === 'examiner'" class="message-label" aria-hidden="true">
-                <i class="pi pi-clipboard"></i> Examinateur
+            <span v-if="label" class="message-label" aria-hidden="true">
+                <i v-if="labelIcon" :class="labelIcon"></i> {{ label }}
             </span>
             <p class="message-content"><span class="sr-only">{{ speakerPrefix }}</span>{{ displayedContent }}</p>
             <span v-if="message.interrupted_by" class="message-cut">
@@ -74,6 +74,23 @@ const speakerPrefix = computed(() => {
     }
 });
 
+// Étiquette visible au-dessus de la bulle (l'étudiant n'en a pas : c'est lui, à droite)
+const label = computed(() => {
+    switch (props.message.role) {
+        case 'patient': return props.interlocutor || 'Patient';
+        case 'examiner': return 'Examinateur';
+        case 'system': return 'Consignes';
+        default: return '';
+    }
+});
+const labelIcon = computed(() => {
+    switch (props.message.role) {
+        case 'examiner': return 'pi pi-clipboard';
+        case 'system': return 'pi pi-file';
+        default: return '';
+    }
+});
+
 // Classe d'alignement selon le rôle
 const alignmentClass = computed(() => {
     return props.message.role === 'student' ? 'align-right' : 'align-left';
@@ -117,15 +134,14 @@ const formattedTime = computed(() => {
 <style scoped>
 .message-wrapper {
     display: flex;
-    margin-bottom: 0.75rem;
-    padding: 0 0.5rem;
-    animation: slideIn 0.2s ease-out;
+    margin-bottom: 0.85rem;
+    animation: slideIn 0.18s ease-out;
 }
 
 @keyframes slideIn {
     from {
         opacity: 0;
-        transform: translateY(10px);
+        transform: translateY(6px);
     }
     to {
         opacity: 1;
@@ -148,62 +164,84 @@ const formattedTime = computed(() => {
 }
 
 .message-bubble {
-    max-width: min(70%, 48rem);
-    padding: 0.75rem 1rem;
-    border-radius: 1rem;
-    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
-    word-wrap: break-word;
+    max-width: min(75%, 46rem);
+    padding: 0.65rem 0.95rem;
+    border-radius: 16px;
     overflow-wrap: break-word;
 }
 
 @media (max-width: 640px) {
     .message-bubble {
-        max-width: 88%;
+        max-width: 90%;
     }
 }
 
-/* Messages de l'étudiant : vert clair, à droite */
+/* Étudiant : bleu, à droite */
 .bubble-student {
-    background-color: #d4edda;
-    border-bottom-right-radius: 0.25rem;
-    color: #0f3d1a;
+    background: var(--ecos-primary);
+    color: #ffffff;
+    border-bottom-right-radius: 4px;
 }
 
-/* Messages du patient : gris clair, à gauche */
+.bubble-student .message-timestamp {
+    color: #ffffff;
+}
+
+/* Patient ou professionnel simulé : bulle blanche, à gauche */
 .bubble-patient {
-    background-color: #e9ecef;
-    border-bottom-left-radius: 0.25rem;
-    color: #212529;
+    background: var(--ecos-surface);
+    border: 1px solid var(--ecos-border);
+    border-bottom-left-radius: 4px;
+    color: var(--ecos-text);
 }
 
-/* Messages système : blanc avec bordure, à gauche */
+/* Consignes de la station : encart sur toute la largeur */
 .bubble-system {
-    background-color: #ffffff;
-    border: 2px solid #6c757d;
-    border-bottom-left-radius: 0.25rem;
-    color: #374151;
+    max-width: 100%;
+    width: 100%;
+    background: var(--ecos-primary-soft);
+    border: 1px solid var(--ecos-primary-border);
+    border-radius: var(--ecos-radius);
+    color: var(--ecos-text);
 }
 
-/* Informations de l'examinateur (hors personnage) : bleu clair, à gauche */
+.bubble-system .message-label {
+    color: var(--ecos-primary-strong);
+}
+
+/* Examinateur (hors personnage) : encart neutre avec liseré */
 .bubble-examiner {
-    background-color: #e7f1fb;
-    border-left: 4px solid #2f6fab;
-    border-bottom-left-radius: 0.25rem;
-    color: #1d3d5c;
+    background: var(--ecos-surface-muted);
+    border: 1px solid var(--ecos-border);
+    border-left: 3px solid #475569;
+    border-radius: 10px;
+    color: var(--ecos-text);
 }
 
 /* Message étudiant refusé par les garde-fous */
 .bubble-blocked {
-    border: 1px dashed #4b5563;
+    background: var(--ecos-surface-muted);
+    color: var(--ecos-text-2);
+    border: 1px dashed #64748b;
 }
 
 .bubble-blocked .message-content {
     text-decoration: line-through;
 }
 
+.bubble-blocked .message-timestamp {
+    color: var(--ecos-muted);
+}
+
 /* Message étudiant non envoyé (réseau, serveur) */
 .bubble-failed {
-    border: 2px dashed #b91c1c;
+    background: var(--ecos-danger-soft);
+    color: var(--ecos-text);
+    border: 1px dashed var(--ecos-danger);
+}
+
+.bubble-failed .message-timestamp {
+    color: var(--ecos-muted);
 }
 
 .message-failed {
@@ -223,12 +261,15 @@ const formattedTime = computed(() => {
 }
 
 .message-label {
-    display: block;
+    display: flex;
+    align-items: center;
+    gap: 0.35rem;
     margin-bottom: 0.25rem;
     font-size: 0.75rem;
-    font-weight: 600;
+    font-weight: 650;
     text-transform: uppercase;
-    letter-spacing: 0.03em;
+    letter-spacing: 0.04em;
+    color: var(--ecos-muted);
 }
 
 .message-cut {
@@ -251,9 +292,11 @@ const formattedTime = computed(() => {
 .message-attachment-preview {
     display: block;
     max-width: 100%;
-    max-height: 320px;
+    max-height: 340px;
     margin-top: 0.5rem;
-    border-radius: 0.5rem;
+    border-radius: 8px;
+    border: 1px solid var(--ecos-border);
+    background: #ffffff;
 }
 
 .message-attachment-link {
@@ -272,14 +315,15 @@ const formattedTime = computed(() => {
 .message-content {
     margin: 0;
     font-size: 0.95rem;
-    line-height: 1.4;
+    line-height: 1.5;
     white-space: pre-wrap;
 }
 
 .message-timestamp {
     display: block;
-    margin-top: 0.25rem;
-    font-size: 0.75rem;
+    margin-top: 0.2rem;
+    font-size: 0.72rem;
     text-align: right;
+    color: var(--ecos-muted);
 }
 </style>

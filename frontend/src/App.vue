@@ -15,6 +15,11 @@ const router = useRouter()
 const canAuthor = computed(() => isTeacher(auth.user))
 const mainView = ref<HTMLElement | null>(null)
 
+/** Page de connexion : plein écran, sans barre */
+const bare = computed(() => route.name === 'login')
+/** Station en cours : toute la hauteur de la fenêtre, défilement interne */
+const fullHeight = computed(() => route.name === 'chat')
+
 function close() {
   visible.value = false
 }
@@ -46,16 +51,48 @@ watch(() => route.path, async () => {
 <template>
   <a class="skip-link" href="#contenu">Aller au contenu</a>
   <div class="app-shell">
-    <div class="floating-menu-button" :class="{ 'menu-open': visible }">
-      <Button
-        icon="pi pi-bars"
-        rounded
-        aria-label="Ouvrir le menu principal"
-        :aria-expanded="visible"
-        @click="visible = true"
-      />
-    </div>
+    <header v-if="!bare" class="app-bar">
+      <div class="app-bar-inner">
+        <Button
+          class="menu-toggle"
+          icon="pi pi-bars"
+          text
+          rounded
+          severity="secondary"
+          aria-label="Ouvrir le menu principal"
+          :aria-expanded="visible"
+          @click="visible = true"
+        />
+        <RouterLink to="/" class="brand" aria-label="ECOS Entraînement, accueil">
+          <span class="brand-mark" aria-hidden="true">E</span>
+          <span class="brand-name">ECOS <span class="brand-sub">Entraînement</span></span>
+        </RouterLink>
 
+        <nav v-if="auth.isAuthenticated" class="app-nav" aria-label="Navigation principale">
+          <RouterLink to="/" exact-active-class="active">Stations</RouterLink>
+          <RouterLink v-if="canAuthor" to="/atelier" active-class="active">Atelier</RouterLink>
+          <RouterLink to="/compte" active-class="active">Mon compte</RouterLink>
+        </nav>
+
+        <div class="app-user">
+          <template v-if="auth.isAuthenticated">
+            <span class="user-name"><i class="pi pi-user" aria-hidden="true"></i>{{ auth.displayName }}</span>
+            <Button
+              label="Se déconnecter"
+              icon="pi pi-sign-out"
+              severity="secondary"
+              text
+              size="small"
+              :loading="loggingOut"
+              @click="logout"
+            />
+          </template>
+          <RouterLink v-else to="/login">Connexion</RouterLink>
+        </div>
+      </div>
+    </header>
+
+    <!-- Petits écrans : la navigation passe dans un tiroir -->
     <Drawer v-model:visible="visible" header="Menu principal">
       <nav aria-label="Menu principal">
         <ul class="menu-list">
@@ -82,7 +119,10 @@ watch(() => route.path, async () => {
     </Drawer>
 
     <main id="contenu" ref="mainView" class="main-view" tabindex="-1">
-      <RouterView />
+      <RouterView v-if="bare" />
+      <div v-else class="page-frame" :class="{ 'full-height': fullHeight }">
+        <RouterView />
+      </div>
     </main>
 
     <Toast position="top-right" />
@@ -113,21 +153,100 @@ watch(() => route.path, async () => {
   top: 0.5rem;
 }
 
-/* Bouton du menu, fixe en haut à gauche */
-.floating-menu-button {
-  position: fixed;
-  top: 1rem;
-  left: 1rem;
-  z-index: 1000;
-  transition: opacity 0.3s ease;
+/* ---------- Barre de l'application ---------- */
+.app-bar {
+  flex-shrink: 0;
+  background: var(--ecos-surface);
+  border-bottom: 1px solid var(--ecos-border);
 }
 
-/* Masquer le bouton quand le menu est ouvert */
-.floating-menu-button.menu-open {
-  opacity: 0;
-  pointer-events: none;
+.app-bar-inner {
+  display: flex;
+  align-items: center;
+  gap: 1.5rem;
+  height: 3.5rem;
+  padding: 0 1.5rem;
 }
 
+.menu-toggle {
+  display: none !important;
+}
+
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  color: var(--ecos-text);
+  text-decoration: none;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.brand:hover {
+  color: var(--ecos-text);
+}
+
+.brand-mark {
+  display: inline-grid;
+  place-items: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 8px;
+  background: var(--ecos-primary);
+  color: #ffffff;
+  font-size: 1rem;
+}
+
+.brand-sub {
+  font-weight: 500;
+  color: var(--ecos-muted);
+}
+
+.app-nav {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+  height: 100%;
+}
+
+.app-nav a {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.85rem;
+  color: var(--ecos-text-2);
+  font-weight: 500;
+  text-decoration: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+}
+.app-nav a:hover {
+  color: var(--ecos-text);
+  background: var(--ecos-surface-muted);
+}
+.app-nav a.active {
+  color: var(--ecos-primary-strong);
+  border-bottom-color: var(--ecos-primary);
+}
+
+.app-user {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.user-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  color: var(--ecos-text-2);
+  font-size: 0.9rem;
+}
+.user-name .pi {
+  color: var(--ecos-muted);
+}
+
+/* ---------- Menu (tiroir) ---------- */
 .menu-list {
   list-style: none;
   margin: 0;
@@ -148,16 +267,14 @@ watch(() => route.path, async () => {
 
 .menu-user {
   margin-top: 2rem;
-  color: #475569;
+  color: var(--ecos-muted);
   font-size: 0.9rem;
 }
 
-/* Défilement dans la zone principale (zoom 200 %, petits écrans) */
+/* ---------- Contenu ---------- */
 .main-view {
   flex: 1;
   min-height: 0;
-  padding-left: 5rem;
-  padding-right: 5rem;
   overflow-y: auto;
   overflow-x: auto;
 }
@@ -166,29 +283,49 @@ watch(() => route.path, async () => {
   outline: none;
 }
 
-/* Tablette : marges réduites */
-@media (max-width: 960px) {
-  .main-view {
-    padding-left: 4.5rem;
-    padding-right: 1.5rem;
+.page-frame {
+  max-width: 1240px;
+  margin: 0 auto;
+  padding: 1.75rem 1.5rem 3rem;
+  box-sizing: border-box;
+}
+
+/* Station : toute la hauteur disponible, sans défilement de page */
+.page-frame.full-height {
+  max-width: 1440px;
+  height: 100%;
+  padding: 1rem 1.5rem;
+  display: flex;
+  flex-direction: column;
+}
+.page-frame.full-height > * {
+  flex: 1;
+  min-height: 0;
+}
+
+@media (max-width: 860px) {
+  .menu-toggle {
+    display: inline-flex !important;
+  }
+  /* Navigation et déconnexion : dans le tiroir */
+  .app-nav,
+  .app-user {
+    display: none;
+  }
+  .app-bar-inner {
+    gap: 0.5rem;
+    padding: 0 0.75rem;
   }
 }
 
-/* Téléphone : le bouton reste en haut à gauche, le contenu prend toute la largeur dessous */
 @media (max-width: 640px) {
-  .floating-menu-button {
-    top: 0.5rem;
-    left: 0.5rem;
+  .page-frame {
+    padding: 1rem 1rem 2.5rem;
   }
-
-  .main-view {
-    padding: 3.75rem 0.75rem 0;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .floating-menu-button {
-    transition: none;
+  .page-frame.full-height {
+    padding: 0.5rem;
+    height: auto;
+    min-height: 100%;
   }
 }
 </style>

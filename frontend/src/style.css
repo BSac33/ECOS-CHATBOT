@@ -1,10 +1,40 @@
+/* ============= Charte ECOS =============
+   Couleurs (contrastes ≥ 4,5:1 sur fond blanc pour le texte), surfaces, rayons, ombres.
+   Les composants PrimeVue suivent le même bleu (theme.ts). */
 :root {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen,
-    Ubuntu, Cantarell, "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
+  --ecos-bg: #f3f5f9;
+  --ecos-surface: #ffffff;
+  --ecos-surface-muted: #f8fafc;
+  --ecos-border: #e2e8f0;
+  --ecos-border-strong: #cbd5e1;
 
-  /* Mode clair forcé */
-  color: #213547;
-  background-color: #ffffff;
+  --ecos-text: #0f172a;
+  --ecos-text-2: #334155;
+  --ecos-muted: #64748b;
+
+  --ecos-primary: #2563eb;
+  --ecos-primary-strong: #1d4ed8;
+  --ecos-primary-soft: #eff6ff;
+  --ecos-primary-border: #bfdbfe;
+
+  --ecos-success: #15803d;
+  --ecos-success-soft: #f0fdf4;
+  --ecos-danger: #b91c1c;
+  --ecos-danger-soft: #fef2f2;
+  --ecos-warning: #b45309;
+  --ecos-warning-soft: #fffbeb;
+
+  --ecos-radius: 12px;
+  --ecos-radius-sm: 8px;
+  --ecos-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 3px rgba(15, 23, 42, 0.04);
+  --ecos-shadow-lg: 0 12px 32px rgba(15, 23, 42, 0.08);
+
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  font-size: 16px;
+  line-height: 1.5;
+  color: var(--ecos-text);
+  background-color: var(--ecos-bg);
+  -webkit-font-smoothing: antialiased;
 }
 
 /* Mise en page : l'application occupe la fenêtre, le défilement se fait dans .main-view */
@@ -12,12 +42,12 @@ html, body, #app {
   height: 100%;
   width: 100%;
   margin: 0;
-  background-color: #ffffff;
 }
 
 body {
   font-family: inherit;
-  color: #213547;
+  color: var(--ecos-text);
+  background-color: var(--ecos-bg);
 }
 
 #app {
@@ -25,7 +55,6 @@ body {
   padding: 0 !important;
   margin: 0 !important;
   text-align: left;
-  background-color: #ffffff;
 }
 
 body, .p-component {
@@ -35,38 +64,28 @@ body, .p-component {
 /* Liens : contraste ≥ 4,5:1 et soulignés (pas seulement la couleur) */
 a {
   font-weight: 500;
-  color: #3730a3;
+  color: var(--ecos-primary-strong);
   text-decoration: underline;
   text-underline-offset: 0.15em;
 }
 a:hover {
-  color: #312e81;
+  color: #1e3a8a;
+}
+
+h1, h2, h3 {
+  color: var(--ecos-text);
+  letter-spacing: -0.01em;
 }
 
 h1 {
-  font-size: 1.9rem;
+  font-size: 1.75rem;
   line-height: 1.2;
-}
-
-button {
-  border-radius: 8px;
-  border: 1px solid transparent;
-  padding: 0.6em 1.2em;
-  font-size: 1em;
-  font-weight: 500;
-  font-family: inherit;
-  background-color: #f9f9f9;
-  cursor: pointer;
-  transition: border-color 0.25s;
-  color: #213547;
-}
-button:hover {
-  border-color: #3730a3;
+  font-weight: 700;
 }
 
 /* Focus clavier toujours visible */
 :focus-visible {
-  outline: 3px solid #1d4ed8;
+  outline: 3px solid var(--ecos-primary-strong);
   outline-offset: 2px;
 }
 
@@ -83,13 +102,36 @@ button:hover {
   border: 0 !important;
 }
 
+/* Surface standard : carte blanche bordée */
+.ecos-card {
+  background: var(--ecos-surface);
+  border: 1px solid var(--ecos-border);
+  border-radius: var(--ecos-radius);
+  box-shadow: var(--ecos-shadow);
+}
+
+/* En-tête de page : titre + sous-titre */
+.page-header {
+  margin: 0 0 1.5rem;
+}
+.page-header h1 {
+  margin: 0;
+}
+.page-header p {
+  margin: 0.35rem 0 0;
+  color: var(--ecos-muted);
+}
+
 /* Mention de transparence (IA) */
 .ai-notice {
   display: inline-flex;
   align-items: center;
   gap: 0.4rem;
   font-size: 0.85rem;
-  color: #3730a3;
+  color: var(--ecos-muted);
+}
+.ai-notice .pi {
+  color: var(--ecos-primary);
 }
 
 /* Animations réduites si l'utilisateur le demande */

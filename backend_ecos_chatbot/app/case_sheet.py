@@ -396,8 +396,8 @@ DOMAIN_STATION_TYPE = {
     "annonce_information": "diagnosis_announcement",
 }
 
-INSTRUCTION_NO_INTERLOCUTOR = ("Sur la plateforme : station sans interlocuteur. Exposez votre raisonnement à voix "
-                               "haute (ou par écrit) ; les examinateurs vous écoutent sans intervenir.")
+INSTRUCTION_NO_INTERLOCUTOR = ("Sur la plateforme : station sans interlocuteur. Rédigez une réponse complète et "
+                               "construite, comme si vous l'exposiez aux examinateurs, puis rendez-la en une fois.")
 INSTRUCTION_GESTURES = ("Sur la plateforme : décrivez à voix haute chaque geste que vous réalisez, "
                         "les examinateurs n'évaluent que ce que vous dites.")
 

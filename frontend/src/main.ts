@@ -2,7 +2,7 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import PrimeVue from 'primevue/config'
 import ToastService from 'primevue/toastservice'
-import Aura from '@primeuix/themes/aura'
+import { EcosTheme } from './theme'
 import App from './App.vue'
 import { createAppRouter } from './router'
 import { fr } from './locale-fr'
@@ -18,7 +18,7 @@ app.use(createAppRouter(pinia))
 app.use(PrimeVue, {
   locale: fr,
   theme: {
-    preset: Aura,
+    preset: EcosTheme,
     options: {
       darkModeSelector: 'none', // pas de mode sombre automatique
     },

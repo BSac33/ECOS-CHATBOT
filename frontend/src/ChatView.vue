@@ -6,9 +6,23 @@
             :attempt-id="attemptId"
             :title="caseTitle"
             :interlocutor="noInterlocutor ? 'aucun' : interlocutor"
+            :show-stop="!noInterlocutor"
+            :on-expire="noInterlocutor ? submitWrittenOnExpire : undefined"
         />
 
-        <div class="chat-body">
+        <p v-if="!infoLoaded" class="loading" role="status">Chargement de la station…</p>
+
+        <!-- Station sans interlocuteur : énoncé et documents à gauche, réponse rédigée à droite -->
+        <WrittenStation
+            v-else-if="noInterlocutor"
+            ref="written"
+            :attempt-id="attemptId"
+            :instructions="stationInstructions"
+            :documents="vignetteDocuments"
+            :disabled="stationOver"
+        />
+
+        <div v-else class="chat-body">
             <!-- Consultation orale : pas de texte par défaut, la transcription reste enregistrée -->
             <VoiceConsultation
                 v-if="consulting"
@@ -68,12 +82,6 @@
                 <Button label="Couper" size="small" text severity="secondary" @click="voice.interrupt()" />
             </div>
 
-            <!-- Station sans interlocuteur : rappel de la consigne -->
-            <div v-if="noInterlocutor && !consulting" class="silent-hint">
-                <i class="pi pi-info-circle" aria-hidden="true"></i>
-                Station sans interlocuteur : exposez votre raisonnement à voix haute ou par écrit. Les examinateurs vous écoutent sans intervenir.
-            </div>
-
             <p v-if="stationOver" class="station-over" role="alert">{{ EXPIRED_MESSAGE }}</p>
 
             <!-- Saisie : clavier ou voix -->
@@ -90,6 +98,7 @@
                     :class="{ recording: voiceState === 'recording' }"
                     :icon="micIcon"
                     :severity="voiceState === 'recording' ? 'danger' : 'secondary'"
+                    :outlined="voiceState !== 'recording'"
                     :loading="voiceState === 'connecting' || voiceState === 'transcribing'"
                     :disabled="isSendingMessage || stationOver"
                     :aria-label="micLabel"
@@ -121,6 +130,7 @@ import ChatHeader from './components/ChatHeader.vue';
 import ChatBubble from './components/Message.vue';
 import Textbox from './components/Textbox.vue';
 import VoiceConsultation, { type ConsultationStatus } from './components/VoiceConsultation.vue';
+import WrittenStation from './components/WrittenStation.vue';
 import { VoiceClient, type VoiceEvent } from './services/voice';
 import { apiService } from './services/api';
 import { ApiError, errorMessage } from './services/http';
@@ -152,6 +162,7 @@ function examinerNoteToMessage(note: ExaminerNote): ChatMessage {
 // ============= ÉTAT =============
 
 const header = ref<InstanceType<typeof ChatHeader> | null>(null);
+const written = ref<InstanceType<typeof WrittenStation> | null>(null);
 const messageContainer = ref<HTMLElement | null>(null);
 const messages = ref<ChatMessage[]>([]);
 const draft = ref('');
@@ -164,6 +175,8 @@ const isPatientTyping = ref(false);
 const stationOver = ref(false);
 
 const caseTitle = ref('');
+const infoLoaded = ref(false);
+const stationInstructions = ref('');
 const interlocutor = ref<Interlocutor>('patient');
 /** Station sans patient ni professionnel simulé : l'étudiant parle seul devant les examinateurs */
 const noInterlocutor = computed(() => interlocutor.value === 'aucun');
@@ -225,10 +238,21 @@ async function loadStationInfo() {
         caseTitle.value = info.title;
         interlocutor.value = info.interlocutor ?? 'patient';
         interlocutorLabel.value = info.interlocutor_label || 'Patient';
+        stationInstructions.value = info.student_instructions ?? '';
     } catch {
         // information facultative : comportement par défaut (avec patient)
         caseTitle.value = 'Station';
+    } finally {
+        infoLoaded.value = true;
     }
+}
+
+/** Documents remis avec la vignette (messages de l'examinateur portant une pièce jointe) */
+const vignetteDocuments = computed(() => messages.value.filter(m => m.role === 'examiner' && m.attachment_id));
+
+/** Fin du temps d'une station écrite : la réponse en cours est rendue */
+async function submitWrittenOnExpire(): Promise<boolean> {
+    return written.value ? written.value.submitOnExpire() : false;
 }
 
 // ============= AFFICHAGE D'UN TOUR (commun écrit / vocal) =============
@@ -606,6 +630,9 @@ function handleVoiceEvent(event: VoiceEvent) {
 
 onMounted(async () => {
     await Promise.all([loadMessages(), loadStationInfo()]);
+    if (!stationInstructions.value) {
+        stationInstructions.value = messages.value.find(m => m.role === 'system')?.content ?? '';
+    }
 });
 
 onBeforeUnmount(() => {
@@ -618,17 +645,26 @@ onBeforeUnmount(() => {
 .chat-view {
     display: flex;
     flex-direction: column;
+    gap: 0.75rem;
     min-height: 0;
     height: 100%;
 }
 
+.chat-view > .written-station {
+    flex: 1;
+}
+
+/* Conversation et saisie dans une même carte */
 .chat-body {
     display: flex;
     flex-direction: column;
-    gap: 1rem;
-    padding: 1rem;
     flex: 1;
     min-height: 0;
+    background: var(--ecos-surface);
+    border: 1px solid var(--ecos-border);
+    border-radius: var(--ecos-radius);
+    box-shadow: var(--ecos-shadow);
+    overflow: hidden;
 }
 
 .message-container {
@@ -638,19 +674,24 @@ onBeforeUnmount(() => {
     /* Toujours une zone de lecture, même au zoom 200 % : la page défile alors */
     min-height: 12rem;
     overflow-y: auto;
-    padding: 0.5rem;
+    padding: 1.25rem 1.25rem 0.5rem;
     scroll-behavior: smooth;
+    background: var(--ecos-surface-muted);
 }
 
 .message-container:focus-visible {
-    outline: 3px solid #1d4ed8;
-    outline-offset: 2px;
+    outline: 3px solid var(--ecos-primary-strong);
+    outline-offset: -3px;
 }
 
 .loading {
     text-align: center;
     padding: 2rem;
-    color: #4b5563;
+    color: var(--ecos-muted);
+}
+
+.load-error {
+    margin: 1rem 1rem 0;
 }
 
 .load-error :deep(.p-message-text) {
@@ -660,22 +701,10 @@ onBeforeUnmount(() => {
     flex-wrap: wrap;
 }
 
-.silent-hint {
-    display: flex;
-    gap: .5rem;
-    align-items: center;
-    padding: .5rem .75rem;
-    border-radius: 8px;
-    background: #f1f5f9;
-    color: #334155;
-    font-size: .9rem;
-}
-
 .station-over {
     margin: 0;
-    padding: 0.5rem 0.75rem;
-    border-radius: 8px;
-    background: #343a40;
+    padding: 0.6rem 1.25rem;
+    background: #334155;
     color: #ffffff;
     font-weight: 600;
 }
@@ -685,15 +714,19 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     gap: 0.25rem;
-    padding: 0.75rem 1rem;
-    margin-left: 0.5rem;
-    max-width: 70%;
+    width: fit-content;
+    padding: 0.7rem 0.9rem;
+    margin-bottom: 0.85rem;
+    border: 1px solid var(--ecos-border);
+    border-radius: 16px;
+    border-bottom-left-radius: 4px;
+    background: var(--ecos-surface);
 }
 
 .typing-indicator span {
-    width: 8px;
-    height: 8px;
-    background-color: #6c757d;
+    width: 7px;
+    height: 7px;
+    background-color: #64748b;
     border-radius: 50%;
     animation: typing 1.4s infinite;
 }
@@ -713,26 +746,28 @@ onBeforeUnmount(() => {
     }
     30% {
         opacity: 1;
-        transform: translateY(-10px);
+        transform: translateY(-5px);
     }
 }
 
 /* Saisie : zone de texte + boutons micro */
 .input-row {
     display: flex;
-    align-items: center;
+    align-items: flex-end;
     gap: 0.5rem;
+    padding: 0.85rem 1rem;
+    border-top: 1px solid var(--ecos-border);
+    background: var(--ecos-surface);
 }
 
 .input-box {
     flex: 1;
     min-width: 0;
-    padding: .5rem;
 }
 
 .mic-button {
-    width: 3.25rem;
-    height: 3.25rem;
+    width: 2.9rem;
+    height: 2.9rem;
     flex-shrink: 0;
 }
 
@@ -741,8 +776,8 @@ onBeforeUnmount(() => {
 }
 
 @keyframes pulse {
-    0%, 100% { box-shadow: 0 0 0 0 rgba(220, 53, 69, 0.45); }
-    50% { box-shadow: 0 0 0 8px rgba(220, 53, 69, 0); }
+    0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.45); }
+    50% { box-shadow: 0 0 0 8px rgba(220, 38, 38, 0); }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -756,15 +791,15 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 640px) {
-    .chat-body {
-        padding: 0.5rem 0;
+    .message-container {
+        padding: 0.75rem 0.5rem 0.25rem;
     }
     .input-row {
         flex-wrap: wrap;
+        padding: 0.6rem;
     }
     .input-box {
         flex-basis: 100%;
-        padding: 0;
     }
 }
 
@@ -772,8 +807,9 @@ onBeforeUnmount(() => {
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    padding: 0 0.75rem;
-    color: #374151;
+    padding: 0.35rem 1rem;
+    border-top: 1px solid var(--ecos-border);
+    color: var(--ecos-text-2);
     font-size: 0.9rem;
 }
 
@@ -782,12 +818,11 @@ onBeforeUnmount(() => {
 }
 
 .message-container::-webkit-scrollbar-track {
-    background: #f1f1f1;
-    border-radius: 10px;
+    background: transparent;
 }
 
 .message-container::-webkit-scrollbar-thumb {
-    background: #888;
+    background: #cbd5e1;
     border-radius: 10px;
 }
 </style>
