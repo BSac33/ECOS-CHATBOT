@@ -39,7 +39,7 @@ class KyutaiThread:
         self.server = asyncio.run_coroutine_threadsafe(FakeKyutai(**kwargs).start(), self.loop).result(5)
 
     def stop(self):
-        asyncio.run_coroutine_threadsafe(self.server.stop(), self.loop).result(5)
+        asyncio.run_coroutine_threadsafe(self.server.stop(), self.loop).result(10)
         self.loop.call_soon_threadsafe(self.loop.stop)
         self.thread.join(5)
 

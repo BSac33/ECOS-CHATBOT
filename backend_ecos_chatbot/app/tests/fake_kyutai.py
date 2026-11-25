@@ -54,7 +54,9 @@ class FakeKyutai:
         return f"ws://127.0.0.1:{self.port}"
 
     async def start(self) -> "FakeKyutai":
-        self._server = await serve(self._handler, "127.0.0.1", 0, max_size=None)
+        # close_timeout court : à l'arrêt, une connexion dont le client de test a déjà disparu
+        # ne doit pas faire attendre la fermeture 10 s (délai par défaut de websockets)
+        self._server = await serve(self._handler, "127.0.0.1", 0, max_size=None, close_timeout=0.5)
         self.port = self._server.sockets[0].getsockname()[1]
         return self
 
